@@ -13,7 +13,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-from database import get_session, get_api_credentials, create_task, update_task_progress, finish_task
+from database import get_session, create_task, update_task_progress, finish_task
 from userbot import get_joined_channels, resolve_and_join_channel, forward_messages
 from handlers.ui import E, back_kb, cancel_kb, progress_bar, pct
 from handlers.start import _require_admin
@@ -67,8 +67,7 @@ async def fw_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     uid = update.effective_user.id
     session = get_session(uid)
-    creds = get_api_credentials(uid)
-    if not session or not creds:
+    if not session:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(
             f"{E['error']} You are not logged in. Please login first.",

@@ -6,7 +6,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
 
-from database import get_session, get_api_credentials
+from database import get_session
 from userbot import get_joined_channels
 from handlers.ui import E, back_kb
 from handlers.start import _require_admin
@@ -45,8 +45,7 @@ async def ch_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
     session = get_session(uid)
-    creds = get_api_credentials(uid)
-    if not session or not creds:
+    if not session:
         await msg.edit_text(
             f"{E['error']} You are not logged in. Go back and login first.",
             reply_markup=back_kb("home"),
@@ -54,7 +53,7 @@ async def ch_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        channels = await get_joined_channels(session, creds["api_id"], creds["api_hash"])
+        channels = await get_joined_channels(session)
         ctx.user_data["channels"] = channels
     except Exception as e:
         await msg.edit_text(

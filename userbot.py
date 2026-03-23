@@ -32,29 +32,28 @@ import config
 import os
 import uuid
 
-def _make_client(api_id: int, api_hash: str, session_string: str | None = None) -> Client:
-    """Create a Pyrogram client, using file-backed storage if logging in to prevent SQLite :memory: drops."""
-    kwargs = {
-        "api_id": api_id,
-        "api_hash": api_hash,
-        "device_model": "PC",
-        "system_version": "Windows 10",
-        "app_version": "5.1.1",
-        "lang_code": "en",
-    }
-    
-    if session_string:
-        # If we already have a session string, memory storage is fine (no multi-step auth needed)
-        kwargs["name"] = "autoforward_user"
-        kwargs["session_string"] = session_string
-        kwargs["in_memory"] = True
-    else:
-        # File-backed session for login flow to ensure auth_key persists across async gaps
-        name = f"login_{uuid.uuid4().hex}"
-        kwargs["name"] = name
-        # We don't set in_memory=True here, so Pyrogram creates a .session file in the CWD
-        
-    return Client(**kwargs)
+# Default fallback values — Pyrogram needs non-empty api_id/api_hash to construct
+# the Client even when a session_string is provided (auth_key is embedded in the string).
+_DEFAULT_API_ID = 2
+_DEFAULT_API_HASH = "36722c72256a24c1225de00eb6a1ca74"
+
+def _make_client(
+    api_id: int | None = None,
+    api_hash: str | None = None,
+    session_string: str | None = None,
+) -> Client:
+    """Create a Pyrogram in-memory client. api_id/api_hash are optional when session_string is supplied."""
+    return Client(
+        name="autoforward_user",
+        api_id=api_id or _DEFAULT_API_ID,
+        api_hash=api_hash or _DEFAULT_API_HASH,
+        session_string=session_string,
+        in_memory=True,
+        device_model="PC",
+        system_version="Windows 10",
+        app_version="5.1.1",
+        lang_code="en",
+    )
 
 
 def _channel_id_from_text(text: str) -> str:
