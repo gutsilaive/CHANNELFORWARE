@@ -1,0 +1,23 @@
+services:
+  - type: web             # Web service so Render assigns a public URL to ping
+    name: autoforward-bot
+    runtime: python
+    plan: free
+    numInstances: 1       # Exactly 1 instance — no duplicate bots
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: PORT
+        value: "8080"
