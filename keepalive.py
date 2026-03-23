@@ -19,15 +19,22 @@ class _Handler(BaseHTTPRequestHandler):
             body = b'{"status":"ok","bot":"AutoForward Bot","alive":true}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if self.command != "HEAD":
+                self.wfile.write(body)
         else:
             body = b"AutoForward Bot is alive! Visit /health for status."
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+    def do_HEAD(self):
+        self.do_GET()
 
     def log_message(self, format, *args):
         pass  # silence access logs
