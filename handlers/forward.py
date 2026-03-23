@@ -66,6 +66,7 @@ async def fw_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _require_admin(update, ctx):
         return ConversationHandler.END
     uid = update.effective_user.id
+    session = get_session(uid)
     creds = get_api_credentials(uid)
     if not session or not creds:
         await update.callback_query.answer()
