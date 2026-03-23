@@ -10,7 +10,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-from database import get_session, save_session, delete_session, get_api_credentials
+from database import get_session, save_session, delete_session
 from handlers.ui import E, back_kb, cancel_kb
 from handlers.start import _require_admin
 
@@ -85,29 +85,12 @@ async def got_session(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Validate by actually connecting with it
     try:
         from pyrogram import Client as PyroClient
-
-        creds = get_api_credentials(uid)
-        if not creds:
-            # Try to extract api_id/hash from the session string itself
-            # Pyrogram session strings encode this info — try common test credentials
-            # We'll use a trick: connect with the session and read its own data
-            await msg.edit_text(
-                f"{E['warn']} *API credentials needed*\n\n"
-                "To validate your session, please also provide your *API ID* (just the number).\n"
-                "You used it when generating the session string:",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=cancel_kb(),
-            )
-            ctx.user_data["_pending_session"] = text
-            return _API_ID_FOR_VALIDATION
-
-        api_id = creds["api_id"]
-        api_hash = creds["api_hash"]
+        from userbot import _DEFAULT_API_ID, _DEFAULT_API_HASH
 
         async with PyroClient(
             name="validate",
-            api_id=api_id,
-            api_hash=api_hash,
+            api_id=_DEFAULT_API_ID,
+            api_hash=_DEFAULT_API_HASH,
             session_string=text,
             in_memory=True,
         ) as client:
@@ -117,8 +100,7 @@ async def got_session(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save_session(uid, phone, text)
         await msg.edit_text(
             f"{E['done']} *Login Successful!* ✅\n\n"
-            f"Logged in as `{me.first_name}` (`{phone}`).\n\n"
-            "Use /start to access the main menu.",
+            f"Logged in as `{me.first_name}` (`{phone}`).",
             parse_mode=ParseMode.MARKDOWN,
         )
         return ConversationHandler.END
@@ -132,76 +114,6 @@ async def got_session(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
 
-# Extra states needed when no API creds exist yet
-_API_ID_FOR_VALIDATION = 1
-_API_HASH_FOR_VALIDATION = 2
-
-
-async def got_api_id_for_val(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if not text.isdigit():
-        await update.message.reply_text(
-            f"{E['warn']} API ID must be numbers only. Try again:",
-            reply_markup=cancel_kb(),
-        )
-        return _API_ID_FOR_VALIDATION
-    ctx.user_data["_val_api_id"] = int(text)
-    await update.message.reply_text(
-        f"{E['done']} Got it. Now send your *API Hash* (32-char string):",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=cancel_kb(),
-    )
-    return _API_HASH_FOR_VALIDATION
-
-
-async def got_api_hash_for_val(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    api_hash = update.message.text.strip()
-    api_id = ctx.user_data.get("_val_api_id")
-    session_str = ctx.user_data.get("_pending_session")
-
-    if not api_id or not session_str or len(api_hash) < 20:
-        await update.message.reply_text(
-            f"{E['error']} Something went wrong. Please /start and try again."
-        )
-        return ConversationHandler.END
-
-    msg = await update.message.reply_text(f"{E['clock']} Validating session…")
-
-    try:
-        from pyrogram import Client as PyroClient
-        from database import save_api_credentials
-
-        async with PyroClient(
-            name="validate",
-            api_id=api_id,
-            api_hash=api_hash,
-            session_string=session_str,
-            in_memory=True,
-        ) as client:
-            me = await client.get_me()
-            phone = me.phone_number or str(me.id)
-
-        save_api_credentials(uid, api_id, api_hash)
-        save_session(uid, phone, session_str)
-
-        await msg.edit_text(
-            f"{E['done']} *Login Successful!* ✅\n\n"
-            f"Logged in as `{me.first_name}` (`{phone}`).\n"
-            f"API credentials saved for future use.\n\n"
-            "Use /start to access the main menu.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return ConversationHandler.END
-
-    except Exception as e:
-        await msg.edit_text(
-            f"{E['error']} Failed to validate session:\n`{e}`\n\n"
-            "Check your API credentials and session string. Try /start to retry.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return ConversationHandler.END
-
 
 async def logout_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await _require_admin(update, ctx):
@@ -212,8 +124,7 @@ async def logout_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         await update.callback_query.edit_message_text(
             f"{E['logout']} *Logged Out*\n\n"
-            "Session removed. API credentials kept for next login.\n"
-            "Use /start to log in again.",
+            "Session removed. Use /start to log in again.",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=back_kb("home"),
         )
@@ -222,8 +133,6 @@ async def logout_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data.pop("_pending_session", None)
-    ctx.user_data.pop("_val_api_id", None)
     if update.callback_query:
         await update.callback_query.answer("Cancelled")
         try:
@@ -242,8 +151,6 @@ def register(app):
         entry_points=[CallbackQueryHandler(login_start, pattern="^login_start$")],
         states={
             SESSION_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_session)],
-            _API_ID_FOR_VALIDATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_api_id_for_val)],
-            _API_HASH_FOR_VALIDATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_api_hash_for_val)],
         },
         fallbacks=[
             CallbackQueryHandler(cancel, pattern="^cancel$"),
@@ -253,3 +160,4 @@ def register(app):
     )
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(logout_cb, pattern="^logout$"))
+
