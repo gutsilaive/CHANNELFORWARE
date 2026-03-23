@@ -10,6 +10,7 @@ import asyncio, re
 from typing import Callable, Awaitable
 
 from pyrogram import Client
+from pyrogram.raw.functions.messages import CheckChatInvite
 from pyrogram.errors import (
     SessionPasswordNeeded,
     PhoneCodeInvalid,
@@ -164,6 +165,7 @@ async def resolve_and_join_channel(session_string: str, link_or_username: str) -
     async with _make_client(session_string=session_string) as client:
         target = _channel_id_from_text(link_or_username)
 
+        # ── Private invite link (starts with +) ──────────────────────────────
         if target.startswith("+"):
             try:
                 chat = await client.join_chat(target)
@@ -173,7 +175,30 @@ async def resolve_and_join_channel(session_string: str, link_or_username: str) -
                     "username": f"@{chat.username}" if chat.username else str(chat.id),
                 }
             except UserAlreadyParticipant:
-                pass
+                # Already a member — get info via check_invite_link
+                try:
+                    link_info = await client.get_chat(f"t.me/{target}")
+                    return {
+                        "id": link_info.id,
+                        "title": link_info.title,
+                        "username": f"@{link_info.username}" if link_info.username else str(link_info.id),
+                    }
+                except Exception:
+                    # Fallback: list dialogs to find the channel we're already in
+                    try:
+                        inv = await client.invoke(
+                            CheckChatInvite(hash=target.lstrip("+"))
+                        )
+                        chat_obj = getattr(inv, "chat", None)
+                        if chat_obj:
+                            return {
+                                "id": chat_obj.id,
+                                "title": getattr(chat_obj, "title", str(chat_obj.id)),
+                                "username": f"@{chat_obj.username}" if getattr(chat_obj, "username", None) else str(chat_obj.id),
+                            }
+                    except Exception:
+                        pass
+                    raise ValueError("❌ Already a member of this channel but couldn't fetch its info. Try using its @username instead.")
             except InviteHashExpired:
                 raise ValueError("❌ This invite link has expired.")
             except InviteHashInvalid:
@@ -181,10 +206,11 @@ async def resolve_and_join_channel(session_string: str, link_or_username: str) -
             except Exception as e:
                 raise ValueError(f"❌ Could not join via invite link: {e}")
 
+        # ── Public username / numeric ID ──────────────────────────────────────
         try:
             chat = await client.get_chat(target)
         except ChannelPrivate:
-            raise ValueError("❌ This channel is private. Please provide an invite link.")
+            raise ValueError("❌ This channel is private. Please provide an invite link (t.me/+...).")
         except Exception as e:
             raise ValueError(f"❌ Could not resolve channel: {e}")
 
