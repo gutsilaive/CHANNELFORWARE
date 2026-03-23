@@ -29,19 +29,32 @@ import config
 
 # ─────────────────────────────  Helpers  ─────────────────────────────────────
 
+import os
+import uuid
+
 def _make_client(api_id: int, api_hash: str, session_string: str | None = None) -> Client:
-    """Create a Pyrogram in-memory client spoofing exactly as Telegram Desktop."""
-    return Client(
-        name="autoforward_user",
-        api_id=api_id,
-        api_hash=api_hash,
-        session_string=session_string,
-        in_memory=True,
-        device_model="PC",
-        system_version="Windows 10",
-        app_version="5.1.1",
-        lang_code="en",
-    )
+    """Create a Pyrogram client, using file-backed storage if logging in to prevent SQLite :memory: drops."""
+    kwargs = {
+        "api_id": api_id,
+        "api_hash": api_hash,
+        "device_model": "PC",
+        "system_version": "Windows 10",
+        "app_version": "5.1.1",
+        "lang_code": "en",
+    }
+    
+    if session_string:
+        # If we already have a session string, memory storage is fine (no multi-step auth needed)
+        kwargs["name"] = "autoforward_user"
+        kwargs["session_string"] = session_string
+        kwargs["in_memory"] = True
+    else:
+        # File-backed session for login flow to ensure auth_key persists across async gaps
+        name = f"login_{uuid.uuid4().hex}"
+        kwargs["name"] = name
+        # We don't set in_memory=True here, so Pyrogram creates a .session file in the CWD
+        
+    return Client(**kwargs)
 
 
 def _channel_id_from_text(text: str) -> str:
@@ -90,6 +103,7 @@ class LoginSession:
                 phone_code=code.strip(),
             )
             session_string = await self.client.export_session_string()
+            await self.cancel()
             return False, session_string
         except SessionPasswordNeeded:
             return True, ""
@@ -101,15 +115,25 @@ class LoginSession:
     async def submit_password(self, password: str) -> str:
         """Check 2FA password. Returns session_string."""
         await self.client.check_password(password.strip())
-        return await self.client.export_session_string()
+        session_string = await self.client.export_session_string()
+        await self.cancel()
+        return session_string
 
     async def cancel(self):
+        """Disconnect and cleanup temporary session files."""
         if self.client:
+            name = self.client.name
             try:
                 await self.client.disconnect()
             except Exception:
                 pass
             self.client = None
+            if name and name.startswith("login_"):
+                for ext in (".session", ".session-journal"):
+                    try:
+                        os.remove(f"{name}{ext}")
+                    except OSError:
+                        pass
 
 
 # ─────────────────────────────  Channel helpers  ─────────────────────────────
