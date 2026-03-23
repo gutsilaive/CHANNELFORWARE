@@ -137,11 +137,11 @@ class LoginSession:
 
 # ─────────────────────────────  Channel helpers  ─────────────────────────────
 
-async def get_joined_channels(session_string: str, api_id: int, api_hash: str) -> list[dict]:
-    """Return list of dicts: {id, title, username, type}."""
+async def get_joined_channels(session_string: str) -> list[dict]:
+    """Return list of dicts: {id, title, username, type}. Fast — caps at 500 dialogs."""
     results = []
-    async with _make_client(api_id, api_hash, session_string) as client:
-        async for dialog in client.get_dialogs():
+    async with _make_client(session_string=session_string) as client:
+        async for dialog in client.get_dialogs(limit=500):
             chat: Chat = dialog.chat
             if chat.type.name in ("CHANNEL", "SUPERGROUP", "GROUP"):
                 results.append(
@@ -155,14 +155,13 @@ async def get_joined_channels(session_string: str, api_id: int, api_hash: str) -
     return results
 
 
-async def resolve_and_join_channel(
-    session_string: str, api_id: int, api_hash: str, link_or_username: str
-) -> dict:
+async def resolve_and_join_channel(session_string: str, link_or_username: str) -> dict:
     """
-    Resolve a channel from username/link/invite and auto-join if needed.
+    Resolve a channel from username / link / invite link / numeric ID and auto-join if needed.
     Returns {id, title, username}. Raises ValueError with user-friendly message on error.
+    Accepts: @username, t.me/username, t.me/+hash, https://t.me/... , -100xxxxxxxx
     """
-    async with _make_client(api_id, api_hash, session_string) as client:
+    async with _make_client(session_string=session_string) as client:
         target = _channel_id_from_text(link_or_username)
 
         if target.startswith("+"):
@@ -193,8 +192,8 @@ async def resolve_and_join_channel(
             await client.join_chat(target)
         except UserAlreadyParticipant:
             pass
-        except Exception as e:
-            raise ValueError(f"❌ Could not join channel: {e}")
+        except Exception:
+            pass  # Already a member or admin — no need to join
 
         return {
             "id": chat.id,
@@ -210,8 +209,6 @@ ProgressCallback = Callable[[int, int, int], Awaitable[None]]
 
 async def forward_messages(
     session_string: str,
-    api_id: int,
-    api_hash: str,
     source: str | int,
     destinations: list[str | int],
     start_id: int,
@@ -229,7 +226,7 @@ async def forward_messages(
     skipped = 0
     total = end_id - start_id + 1
 
-    async with _make_client(api_id, api_hash, session_string) as client:
+    async with _make_client(session_string=session_string) as client:
         for msg_id in range(start_id, end_id + 1):
             if stop_event and stop_event.is_set():
                 break

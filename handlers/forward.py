@@ -157,17 +157,16 @@ async def fw_src_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text.strip()
     session = get_session(uid)
-    creds = get_api_credentials(uid)
     awaiting = ctx.user_data.get("_awaiting")
 
-    if not session or not creds:
+    if not session:
         await update.message.reply_text(f"{E['error']} Session expired. Use /start.")
         return ConversationHandler.END
 
     msg = await update.message.reply_text(f"{E['refresh']} Resolving channel…")
 
     try:
-        info = await resolve_and_join_channel(session, creds["api_id"], creds["api_hash"], text)
+        info = await resolve_and_join_channel(session, text)
     except ValueError as e:
         await msg.edit_text(str(e) + "\n\nTry again or /start to cancel.")
         return SRC_INPUT if awaiting == "source" else DST_INPUT
@@ -360,9 +359,8 @@ async def fw_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     uid = update.effective_user.id
     session = get_session(uid)
-    creds = get_api_credentials(uid)
     fw = ctx.user_data.get("fw")
-    if not fw or not session or not creds:
+    if not fw or not session:
         await update.callback_query.answer(f"{E['error']} Session lost. Use /start.", show_alert=True)
         return
 
@@ -407,8 +405,6 @@ async def fw_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         result = await forward_messages(
             session_string=session,
-            api_id=creds["api_id"],
-            api_hash=creds["api_hash"],
             source=fw["source_id"],
             destinations=[d["id"] for d in fw["destinations"]],
             start_id=fw["start_id"],
