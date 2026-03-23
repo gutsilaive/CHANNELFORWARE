@@ -81,7 +81,7 @@ async def fw_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
-        channels = await get_joined_channels(session, creds["api_id"], creds["api_hash"])
+        channels = await get_joined_channels(session)
         ctx.user_data["_all_channels"] = channels
     except Exception as e:
         await msg.edit_text(
