@@ -1,9 +1,8 @@
 """
-handlers/auth.py — Login and Logout conversation handler
-States: API_ID_INPUT → API_HASH_INPUT → PHONE → OTP → (PASSWORD)
-API credentials are collected once and saved to Supabase for reuse.
+handlers/auth.py — Login via session string paste + Logout
+New flow: user pastes a Pyrogram session string (generated locally/Termux/Replit)
+          bot validates it live, then saves to Supabase.
 """
-import asyncio
 from telegram import Update
 from telegram.ext import (
     ContextTypes, ConversationHandler, CommandHandler,
@@ -11,18 +10,27 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-from database import (
-    get_session, save_session, delete_session,
-    get_api_credentials, save_api_credentials
-)
-from userbot import LoginSession
+from database import get_session, save_session, delete_session, get_api_credentials
 from handlers.ui import E, back_kb, cancel_kb
 from handlers.start import _require_admin
 
-# Conversation states
-API_ID_INPUT, API_HASH_INPUT, PHONE, OTP, PASSWORD = range(5)
+# Conversation state
+SESSION_INPUT = 0
 
-_sessions: dict[int, LoginSession] = {}  # uid → active LoginSession
+_HOW_TO = (
+    f"*How to generate a session string (pick one):*\n\n"
+    "📱 *Option A — Termux on Android (FREE):*\n"
+    "`pkg install python` → `pip install pyrogram TgCrypto`\n"
+    "Then run:\n"
+    "```\npython -c \"\nimport asyncio\nfrom pyrogram import Client\nasync def m():\n"
+    "    async with Client('s', api_id=YOUR_ID, api_hash='YOUR_HASH',\n"
+    "                      in_memory=True) as c:\n"
+    "        print(await c.export_session_string())\nasyncio.run(m())\"\n```\n\n"
+    "🌐 *Option B — Replit.com (in browser, FREE):*\n"
+    "Create a new Python repl → paste the code above → Run\n\n"
+    "The program will ask for your phone + OTP, then print a long string.\n"
+    "*Copy that string and paste it here.*"
+)
 
 
 async def login_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -32,208 +40,167 @@ async def login_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if get_session(uid):
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(
-            f"{E['done']} You are already logged in.\n\nUse *Logout* first to switch accounts.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=back_kb("home"),
-        )
+        try:
+            await update.callback_query.edit_message_text(
+                f"{E['done']} You are already logged in.\n\nUse *Logout* first to switch accounts.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=back_kb("home"),
+            )
+        except Exception:
+            pass
         return ConversationHandler.END
 
     await update.callback_query.answer()
-
-    # Check if API credentials are already stored
-    creds = get_api_credentials(uid)
-    if creds:
-        # Skip API creds step — go straight to phone
-        ctx.user_data["_api_id"] = creds["api_id"]
-        ctx.user_data["_api_hash"] = creds["api_hash"]
-        await update.callback_query.edit_message_text(
-            f"{E['key']} *Login — Enter Phone Number*\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{E['done']} API credentials loaded from storage.\n\n"
-            "Send your phone number in international format:\n"
-            "`+1 234 567 8900`\n\n"
-            f"{E['warn']} _Your number is never stored, only a secure session._",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=cancel_kb(),
-        )
-        return PHONE
-
-    # First time — need API credentials
     try:
         await update.callback_query.edit_message_text(
-            f"{E['key']} *Login — Step 1 of 4: API ID*\n"
+            f"{E['key']} *Login — Paste Session String*\n"
             "━━━━━━━━━━━━━━━━━━━━━\n"
-            "You need a Telegram API ID and Hash.\n\n"
-            f"*How to get them:*\n"
-            f"1. Go to [my.telegram.org](https://my.telegram.org/auth)\n"
-            f"2. Login → *API development tools*\n"
-            f"3. Create an app → copy **App api_id** and **App api_hash**\n\n"
-            f"Send your *API ID* (numbers only):",
+            "This bot requires a *Pyrogram session string* to operate.\n\n"
+            + _HOW_TO +
+            f"\n\n{E['warn']} _Send your session string below:_",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=cancel_kb(),
+            disable_web_page_preview=True,
         )
+    except Exception:
+        pass
+    return SESSION_INPUT
+
+
+async def got_session(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    text = update.message.text.strip()
+
+    # Basic validation: Pyrogram session strings are long base64-like strings
+    if len(text) < 200:
+        await update.message.reply_text(
+            f"{E['warn']} That doesn't look like a valid session string (too short).\n\n"
+            "Please paste the full string copied from Termux/Replit.",
+            reply_markup=cancel_kb(),
+        )
+        return SESSION_INPUT
+
+    msg = await update.message.reply_text(f"{E['clock']} Validating session string…")
+
+    # Validate by actually connecting with it
+    try:
+        from pyrogram import Client as PyroClient
+
+        creds = get_api_credentials(uid)
+        if not creds:
+            # Try to extract api_id/hash from the session string itself
+            # Pyrogram session strings encode this info — try common test credentials
+            # We'll use a trick: connect with the session and read its own data
+            await msg.edit_text(
+                f"{E['warn']} *API credentials needed*\n\n"
+                "To validate your session, please also provide your *API ID* (just the number).\n"
+                "You used it when generating the session string:",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=cancel_kb(),
+            )
+            ctx.user_data["_pending_session"] = text
+            return _API_ID_FOR_VALIDATION
+
+        api_id = creds["api_id"]
+        api_hash = creds["api_hash"]
+
+        async with PyroClient(
+            name="validate",
+            api_id=api_id,
+            api_hash=api_hash,
+            session_string=text,
+            in_memory=True,
+        ) as client:
+            me = await client.get_me()
+            phone = me.phone_number or str(me.id)
+
+        save_session(uid, phone, text)
+        await msg.edit_text(
+            f"{E['done']} *Login Successful!* ✅\n\n"
+            f"Logged in as `{me.first_name}` (`{phone}`).\n\n"
+            "Use /start to access the main menu.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ConversationHandler.END
+
     except Exception as e:
-        if "Message is not modified" not in str(e):
-            raise e
-    return API_ID_INPUT
+        await msg.edit_text(
+            f"{E['error']} Failed to validate session:\n`{e}`\n\n"
+            "Make sure you copied the *full* session string.\nTry /start to retry.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ConversationHandler.END
 
 
+# Extra states needed when no API creds exist yet
+_API_ID_FOR_VALIDATION = 1
+_API_HASH_FOR_VALIDATION = 2
 
-async def got_api_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+
+async def got_api_id_for_val(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if not text.isdigit():
         await update.message.reply_text(
             f"{E['warn']} API ID must be numbers only. Try again:",
             reply_markup=cancel_kb(),
         )
-        return API_ID_INPUT
-    ctx.user_data["_api_id"] = int(text)
+        return _API_ID_FOR_VALIDATION
+    ctx.user_data["_val_api_id"] = int(text)
     await update.message.reply_text(
-        f"{E['done']} API ID saved.\n\n"
-        f"{E['key']} *Login — Step 2 of 4: API Hash*\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Now send your *API Hash* (32-character string):",
+        f"{E['done']} Got it. Now send your *API Hash* (32-char string):",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=cancel_kb(),
     )
-    return API_HASH_INPUT
+    return _API_HASH_FOR_VALIDATION
 
 
-async def got_api_hash(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def got_api_hash_for_val(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
     api_hash = update.message.text.strip()
-    if len(api_hash) < 20:
+    api_id = ctx.user_data.get("_val_api_id")
+    session_str = ctx.user_data.get("_pending_session")
+
+    if not api_id or not session_str or len(api_hash) < 20:
         await update.message.reply_text(
-            f"{E['warn']} That doesn't look like a valid API Hash. Try again:",
-            reply_markup=cancel_kb(),
-        )
-        return API_HASH_INPUT
-    ctx.user_data["_api_hash"] = api_hash
-    await update.message.reply_text(
-        f"{E['done']} API Hash saved.\n\n"
-        f"{E['key']} *Login — Step 3 of 4: Phone Number*\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Send your phone number in international format:\n"
-        "`+1 234 567 8900`",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=cancel_kb(),
-    )
-    return PHONE
-
-
-async def got_phone(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    phone = update.message.text.strip()
-    api_id = ctx.user_data.get("_api_id")
-    api_hash = ctx.user_data.get("_api_hash")
-
-    if not api_id or not api_hash:
-        await update.message.reply_text(
-            f"{E['error']} API credentials lost. Please /start again."
+            f"{E['error']} Something went wrong. Please /start and try again."
         )
         return ConversationHandler.END
 
-    msg = await update.message.reply_text(
-        f"{E['clock']} Sending OTP to *{phone}*…",
-        parse_mode=ParseMode.MARKDOWN,
-    )
-    ls = LoginSession()
-    try:
-        code_type = await ls.start_login(phone, api_id, api_hash)
-        _sessions[uid] = ls
-        await msg.edit_text(
-            f"{E['done']} OTP sent via *{code_type}*\n\n"
-            f"{E['key']} *Login — Step 4 of 4: Enter OTP*\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
-            "Please enter the *5-digit OTP* you received:",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=cancel_kb(),
-        )
-        return OTP
-    except Exception as e:
-        await ls.cancel()
-        await msg.edit_text(
-            f"{E['error']} Failed to send OTP:\n`{e}`\n\nTry /start again.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return ConversationHandler.END
-
-
-async def got_otp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    code = update.message.text.strip()
-    ls = _sessions.get(uid)
-    if not ls:
-        await update.message.reply_text(f"{E['error']} Session expired. Please /start again.")
-        return ConversationHandler.END
-
-    msg = await update.message.reply_text(f"{E['clock']} Verifying OTP…")
-    try:
-        needs_pw, session_string = await ls.submit_code(code)
-        if needs_pw:
-            await msg.edit_text(
-                f"{E['lock']} *Two-Factor Authentication*\n"
-                "━━━━━━━━━━━━━━━━━━━━━\n"
-                "Your account has 2FA enabled.\n"
-                "Please enter your *2FA password*:",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=cancel_kb(),
-            )
-            return PASSWORD
-        else:
-            # Save both the session and API credentials
-            save_api_credentials(uid, ls.api_id, ls.api_hash)
-            save_session(uid, ls.phone, session_string)
-            _sessions.pop(uid, None)
-            await msg.edit_text(
-                f"{E['done']} *Login Successful!* ✅\n\n"
-                f"Logged in as `{ls.phone}`.\n"
-                f"API credentials saved securely.\n\n"
-                "Use /start to access the main menu.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return ConversationHandler.END
-    except ValueError as e:
-        await msg.edit_text(str(e) + "\n\nPlease try again.")
-        return OTP
-    except Exception as e:
-        await msg.edit_text(f"{E['error']} Unexpected error: `{e}`\n\nUse /start to retry.")
-        return ConversationHandler.END
-
-
-async def got_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    password = update.message.text.strip()
-    ls = _sessions.get(uid)
-    if not ls:
-        await update.message.reply_text(f"{E['error']} Session expired. Please /start again.")
-        return ConversationHandler.END
+    msg = await update.message.reply_text(f"{E['clock']} Validating session…")
 
     try:
-        await update.message.delete()
-    except Exception:
-        pass
+        from pyrogram import Client as PyroClient
+        from database import save_api_credentials
 
-    msg = await update.effective_chat.send_message(f"{E['clock']} Verifying 2FA password…")
-    try:
-        session_string = await ls.submit_password(password)
-        save_api_credentials(uid, ls.api_id, ls.api_hash)
-        save_session(uid, ls.phone, session_string)
-        _sessions.pop(uid, None)
+        async with PyroClient(
+            name="validate",
+            api_id=api_id,
+            api_hash=api_hash,
+            session_string=session_str,
+            in_memory=True,
+        ) as client:
+            me = await client.get_me()
+            phone = me.phone_number or str(me.id)
+
+        save_api_credentials(uid, api_id, api_hash)
+        save_session(uid, phone, session_str)
+
         await msg.edit_text(
             f"{E['done']} *Login Successful!* ✅\n\n"
-            f"Logged in as `{ls.phone}` with 2FA.\n"
-            "API credentials saved securely.\n\n"
+            f"Logged in as `{me.first_name}` (`{phone}`).\n"
+            f"API credentials saved for future use.\n\n"
             "Use /start to access the main menu.",
             parse_mode=ParseMode.MARKDOWN,
         )
         return ConversationHandler.END
+
     except Exception as e:
         await msg.edit_text(
-            f"{E['error']} Wrong 2FA password:\n`{e}`\n\nTry again:",
+            f"{E['error']} Failed to validate session:\n`{e}`\n\n"
+            "Check your API credentials and session string. Try /start to retry.",
             parse_mode=ParseMode.MARKDOWN,
         )
-        return PASSWORD
+        return ConversationHandler.END
 
 
 async def logout_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -242,25 +209,29 @@ async def logout_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     delete_session(uid)
     await update.callback_query.answer("Logged out ✅")
-    await update.callback_query.edit_message_text(
-        f"{E['logout']} *Logged Out*\n\n"
-        "Session removed. API credentials are kept for next login.\n"
-        "Use /start to log in again.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=back_kb("home"),
-    )
+    try:
+        await update.callback_query.edit_message_text(
+            f"{E['logout']} *Logged Out*\n\n"
+            "Session removed. API credentials kept for next login.\n"
+            "Use /start to log in again.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=back_kb("home"),
+        )
+    except Exception:
+        pass
 
 
 async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    ls = _sessions.pop(uid, None)
-    if ls:
-        asyncio.create_task(ls.cancel())
+    ctx.user_data.pop("_pending_session", None)
+    ctx.user_data.pop("_val_api_id", None)
     if update.callback_query:
         await update.callback_query.answer("Cancelled")
-        await update.callback_query.edit_message_text(
-            f"{E['stop']} Cancelled. Use /start to go back."
-        )
+        try:
+            await update.callback_query.edit_message_text(
+                f"{E['stop']} Cancelled. Use /start to go back."
+            )
+        except Exception:
+            pass
     elif update.message:
         await update.message.reply_text(f"{E['stop']} Cancelled. Use /start.")
     return ConversationHandler.END
@@ -270,11 +241,9 @@ def register(app):
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(login_start, pattern="^login_start$")],
         states={
-            API_ID_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_api_id)],
-            API_HASH_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_api_hash)],
-            PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_phone)],
-            OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_otp)],
-            PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_password)],
+            SESSION_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_session)],
+            _API_ID_FOR_VALIDATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_api_id_for_val)],
+            _API_HASH_FOR_VALIDATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_api_hash_for_val)],
         },
         fallbacks=[
             CallbackQueryHandler(cancel, pattern="^cancel$"),
