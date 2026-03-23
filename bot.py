@@ -3,6 +3,14 @@ bot.py — Main entry point for AutoForward Bot
 """
 import asyncio
 import logging
+import sys
+
+# ── Critical: create event loop before Pyrogram import ──────────────────────
+# Pyrogram calls asyncio.get_event_loop() at module import time.
+# Python 3.12+ raises RuntimeError if no loop exists → we create one first.
+if sys.version_info >= (3, 10):
+    _loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_loop)
 
 from telegram import BotCommand
 from telegram.ext import ApplicationBuilder

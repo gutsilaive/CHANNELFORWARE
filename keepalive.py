@@ -3,13 +3,14 @@ keepalive.py — Tiny HTTP server that keeps Render free-tier web service alive.
 Runs in a background thread alongside the bot.
 Pin this URL with UptimeRobot (every 5 min) to prevent sleep.
 """
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import logging
 
 logger = logging.getLogger(__name__)
 
-PORT = 8080
+PORT = int(os.environ.get("PORT", 8080))  # Render sets PORT dynamically
 
 
 class _Handler(BaseHTTPRequestHandler):
