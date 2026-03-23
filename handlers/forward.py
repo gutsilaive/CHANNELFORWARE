@@ -76,41 +76,56 @@ async def fw_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     await update.callback_query.answer()
-    msg = await update.callback_query.edit_message_text(
-        f"{E['refresh']} Loading your channels…",
-    )
 
-    try:
-        channels = await get_joined_channels(session)
-        ctx.user_data["_all_channels"] = channels
-    except Exception as e:
-        await msg.edit_text(
-            f"{E['error']} Could not fetch channels:\n`{e}`",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=back_kb("home"),
+    # ── Use shared cache from channels module ──────────────────────────────────
+    from handlers.channels import _get_cached, _set_cache
+    cached = _get_cached(ctx, uid)
+
+    if cached:
+        channels = cached
+        loading_msg = None
+    else:
+        loading_msg = await update.callback_query.edit_message_text(
+            f"{E['refresh']} Loading your channels… (first time takes ~15 sec)",
         )
-        return ConversationHandler.END
+        try:
+            channels = await get_joined_channels(session)
+            _set_cache(ctx, uid, channels)
+        except Exception as e:
+            await loading_msg.edit_text(
+                f"{E['error']} Could not fetch channels:\n`{e}`",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=back_kb("home"),
+            )
+            return ConversationHandler.END
 
     # Reset forward state
     ctx.user_data["fw"] = {
         "source_id": None, "source_title": None,
-        "destinations": [],   # list of {id, title, username}
+        "destinations": [],
         "start_id": None, "end_id": None,
         "caption": None,
     }
+    ctx.user_data["_all_channels"] = channels
 
     text = (
         f"{E['forward']} *Forward Messages — Step 1/4*\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"{E['channel']} *Select Source Channel*\n\n"
-        "Pick from your joined channels below, or type a channel link/username manually.\n"
-        "_Supports public, private invite links, and @usernames._"
+        "Pick from your joined channels, or tap **✏️ Type manually** to paste any link."
     )
-    await msg.edit_text(
-        text, parse_mode=ParseMode.MARKDOWN,
-        reply_markup=_src_channels_kb(channels, 0),
-    )
+    if loading_msg:
+        await loading_msg.edit_text(
+            text, parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_src_channels_kb(channels, 0),
+        )
+    else:
+        await update.callback_query.edit_message_text(
+            text, parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_src_channels_kb(channels, 0),
+        )
     return SRC_INPUT
+
 
 
 async def fw_srcpage(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
