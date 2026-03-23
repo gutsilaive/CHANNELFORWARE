@@ -30,13 +30,17 @@ import config
 # ─────────────────────────────  Helpers  ─────────────────────────────────────
 
 def _make_client(api_id: int, api_hash: str, session_string: str | None = None) -> Client:
-    """Create a Pyrogram in-memory client."""
+    """Create a Pyrogram in-memory client spoofing as an official app."""
     return Client(
         name="autoforward_user",
         api_id=api_id,
         api_hash=api_hash,
         session_string=session_string,
         in_memory=True,
+        device_model="Desktop",
+        system_version="Windows 10",
+        app_version="5.0.3",
+        lang_code="en",
     )
 
 
