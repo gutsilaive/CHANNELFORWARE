@@ -41,8 +41,6 @@ def _make_client(api_id: int, api_hash: str, session_string: str | None = None) 
         system_version="Windows 10",
         app_version="5.1.1",
         lang_code="en",
-        system_lang_code="en-US",
-        lang_pack="tdesktop",
     )
 
 
