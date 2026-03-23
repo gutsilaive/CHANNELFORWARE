@@ -30,17 +30,19 @@ import config
 # ─────────────────────────────  Helpers  ─────────────────────────────────────
 
 def _make_client(api_id: int, api_hash: str, session_string: str | None = None) -> Client:
-    """Create a Pyrogram in-memory client spoofing as an official app."""
+    """Create a Pyrogram in-memory client spoofing exactly as Telegram Desktop."""
     return Client(
         name="autoforward_user",
         api_id=api_id,
         api_hash=api_hash,
         session_string=session_string,
         in_memory=True,
-        device_model="Desktop",
+        device_model="PC",
         system_version="Windows 10",
-        app_version="5.0.3",
+        app_version="5.1.1",
         lang_code="en",
+        system_lang_code="en-US",
+        lang_pack="tdesktop",
     )
 
 
