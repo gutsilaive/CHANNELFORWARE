@@ -12,10 +12,6 @@ services:
         sync: false
       - key: ADMIN_ID
         sync: false
-      - key: API_ID
-        sync: false
-      - key: API_HASH
-        sync: false
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_KEY
