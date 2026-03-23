@@ -188,6 +188,46 @@ async def ch_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pass
 
 
+
+# ── Channel info on tap ────────────────────────────────────────────────────────
+
+async def ch_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show details when user taps a channel from the list."""
+    await update.callback_query.answer()
+    ch_id = int(update.callback_query.data.split(":")[1])
+    uid = update.effective_user.id
+    channels: list[dict] = _get_cached(ctx, uid) or []
+    ch = next((c for c in channels if c["id"] == ch_id), None)
+    if not ch:
+        try:
+            await update.callback_query.edit_message_text(
+                f"{E['warn']} Channel not found. Please refresh.",
+                reply_markup=back_kb("ch_list"),
+            )
+        except Exception:
+            pass
+        return
+    type_emoji = {"CHANNEL": "📢", "SUPERGROUP": "👥", "GROUP": "👥"}.get(ch.get("type", ""), "📢")
+    text = (
+        f"{type_emoji} *{ch['title']}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔗 Username: `{ch['username']}`\n"
+        f"🆔 ID: `{ch['id']}`\n"
+        f"📁 Type: `{ch.get('type', 'CHANNEL')}`"
+    )
+    try:
+        await update.callback_query.edit_message_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ Back to list", callback_data="ch_load")],
+                [InlineKeyboardButton(f"{E['back']} Main Menu", callback_data="home")],
+            ]),
+        )
+    except Exception:
+        pass
+
+
 # ── Paste-link flow (ConversationHandler) ─────────────────────────────────────
 
 LINK_INPUT = 10
@@ -273,3 +313,4 @@ def register(app):
     app.add_handler(CallbackQueryHandler(ch_load, pattern="^ch_load$"))
     app.add_handler(CallbackQueryHandler(ch_refresh, pattern="^ch_refresh$"))
     app.add_handler(CallbackQueryHandler(ch_page, pattern=r"^ch_page:\d+$"))
+    app.add_handler(CallbackQueryHandler(ch_info, pattern=r"^ch_info:-?\d+$"))

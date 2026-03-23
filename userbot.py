@@ -240,11 +240,14 @@ async def forward_messages(
     start_id: int,
     end_id: int,
     caption: str | None,
+    thumbnail_path: str | None = None,
     progress_cb: ProgressCallback | None = None,
     stop_event: asyncio.Event | None = None,
 ) -> dict:
     """
-    Copy messages without "Forwarded" tag using copy_message().
+    Copy messages without 'Forwarded' tag using copy_message().
+    - caption: None = keep original, '' = remove caption, any string = override
+    - thumbnail_path: local path to image to use as video thumbnail
     Returns {forwarded, errors, skipped}.
     """
     forwarded = 0
@@ -256,6 +259,8 @@ async def forward_messages(
         for msg_id in range(start_id, end_id + 1):
             if stop_event and stop_event.is_set():
                 break
+
+            # ── Fetch message ──────────────────────────────────────────────────
             try:
                 msg: Message = await client.get_messages(source, msg_id)
             except FloodWait as e:
@@ -276,17 +281,67 @@ async def forward_messages(
                 skipped += 1
                 continue
 
-            effective_caption = caption if caption is not None else (msg.caption or msg.text or "")
+            # ── Determine effective caption ────────────────────────────────────
+            if caption is not None:
+                # User set a caption override (even empty string means "no caption")
+                effective_caption = caption or None
+            else:
+                # Keep original
+                effective_caption = msg.caption or msg.text or None
 
+            # ── Is this a video that can have a thumbnail replaced? ────────────
+            is_video = msg.video is not None or msg.document is not None
+
+            # ── Send to all destinations ───────────────────────────────────────
+            sent_ok = 0
             for dest in destinations:
                 try:
-                    await client.copy_message(
-                        chat_id=dest,
-                        from_chat_id=source,
-                        message_id=msg_id,
-                        caption=effective_caption,
-                        parse_mode=None if not effective_caption else "markdown",
-                    )
+                    if thumbnail_path and is_video:
+                        # Download media, re-upload with new thumbnail
+                        try:
+                            dl_path = await client.download_media(msg, in_memory=False)
+                            if msg.video:
+                                await client.send_video(
+                                    chat_id=dest,
+                                    video=dl_path,
+                                    caption=effective_caption,
+                                    parse_mode="markdown" if effective_caption else None,
+                                    thumb=thumbnail_path,
+                                )
+                            else:
+                                await client.send_document(
+                                    chat_id=dest,
+                                    document=dl_path,
+                                    caption=effective_caption,
+                                    parse_mode="markdown" if effective_caption else None,
+                                    thumb=thumbnail_path,
+                                )
+                            try:
+                                import os; os.remove(dl_path)
+                            except Exception:
+                                pass
+                        except FloodWait as e:
+                            await asyncio.sleep(e.value + 1)
+                            errors += 1
+                            continue
+                        except Exception:
+                            # Fallback: copy without thumbnail
+                            await client.copy_message(
+                                chat_id=dest,
+                                from_chat_id=source,
+                                message_id=msg_id,
+                                caption=effective_caption,
+                                parse_mode="markdown" if effective_caption else None,
+                            )
+                    else:
+                        await client.copy_message(
+                            chat_id=dest,
+                            from_chat_id=source,
+                            message_id=msg_id,
+                            caption=effective_caption,
+                            parse_mode="markdown" if effective_caption else None,
+                        )
+                    sent_ok += 1
                 except FloodWait as e:
                     await asyncio.sleep(e.value + 1)
                     try:
@@ -295,8 +350,9 @@ async def forward_messages(
                             from_chat_id=source,
                             message_id=msg_id,
                             caption=effective_caption,
-                            parse_mode=None if not effective_caption else "markdown",
+                            parse_mode="markdown" if effective_caption else None,
                         )
+                        sent_ok += 1
                     except Exception:
                         errors += 1
                 except ChatAdminRequired:
@@ -304,10 +360,18 @@ async def forward_messages(
                 except Exception:
                     errors += 1
 
-            forwarded += 1
+            # Only count as forwarded if at least one destination succeeded
+            if sent_ok > 0:
+                forwarded += 1
+            elif sent_ok == 0 and destinations:
+                # All destinations failed for this message
+                errors += 1
+                skipped -= 1  # Don't double-count
+
             if progress_cb and forwarded % config.PROGRESS_INTERVAL == 0:
                 await progress_cb(forwarded, total, errors)
 
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.5)
 
     return {"forwarded": forwarded, "errors": errors, "skipped": skipped}
+

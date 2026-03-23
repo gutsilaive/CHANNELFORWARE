@@ -20,7 +20,7 @@ from handlers.start import _require_admin
 import config
 
 # ── Conversation states ───────────────────────────────────────────────────────
-SRC_INPUT, DST_INPUT, RANGE_INPUT, CAPTION_INPUT = range(4)
+SRC_INPUT, DST_INPUT, RANGE_INPUT, CAPTION_INPUT, THUMBNAIL_INPUT = range(5)
 
 # ── Per-user cancel events ────────────────────────────────────────────────────
 _cancel_events: dict[int, asyncio.Event] = {}
@@ -332,13 +332,59 @@ async def fw_range(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def fw_caption(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     caption = update.message.text.strip()
     ctx.user_data["fw"]["caption"] = caption
-    await _show_confirm(update.message, ctx, new_message=True)
-    return ConversationHandler.END
+    await _ask_thumbnail(update.message, ctx, new_message=True)
+    return THUMBNAIL_INPUT
 
 
 async def fw_skip_caption(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     ctx.user_data["fw"]["caption"] = None
+    await _ask_thumbnail(update.callback_query.message, ctx)
+    return THUMBNAIL_INPUT
+
+
+async def _ask_thumbnail(message, ctx, new_message=False):
+    """Ask user to send a thumbnail image or skip."""
+    fw = ctx.user_data["fw"]
+    caption_preview = f"`{fw['caption'][:60]}`" if fw.get("caption") else "_keep original_"
+    text = (
+        f"🖼️ *Step 5/5 — Thumbnail (optional)*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Caption: {caption_preview}\n\n"
+        "Send a *photo* to use as the custom thumbnail for videos,\n"
+        "or press *Skip* to keep original thumbnails."
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏭ Skip (keep original)", callback_data="fw_skip_thumbnail")],
+        [InlineKeyboardButton(f"{E['stop']} Cancel", callback_data="fw_cancel")],
+    ])
+    if new_message:
+        await message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    else:
+        await message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+
+async def fw_thumbnail(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """User sent a photo to use as thumbnail."""
+    import os, tempfile
+    photo = update.message.photo[-1]  # Largest photo size
+    msg = await update.message.reply_text("🔄 Downloading thumbnail...")
+    try:
+        file = await photo.get_file()
+        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        tmp.close()
+        await file.download_to_drive(tmp.name)
+        ctx.user_data["fw"]["thumbnail_path"] = tmp.name
+        await msg.delete()
+    except Exception:
+        ctx.user_data["fw"]["thumbnail_path"] = None
+    await _show_confirm(update.message, ctx, new_message=True)
+    return ConversationHandler.END
+
+
+async def fw_skip_thumbnail(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    ctx.user_data["fw"]["thumbnail_path"] = None
     await _show_confirm(update.callback_query.message, ctx)
     return ConversationHandler.END
 
@@ -346,7 +392,8 @@ async def fw_skip_caption(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def _show_confirm(message, ctx: ContextTypes.DEFAULT_TYPE, new_message: bool = False):
     fw = ctx.user_data["fw"]
     dst_list = "\n".join(f"  • `{d['title'][:40]}`" for d in fw["destinations"])
-    caption_preview = f"`{fw['caption'][:80]}`" if fw["caption"] else "_keep original_"
+    caption_preview = f"`{fw['caption'][:80]}`" if fw.get("caption") else "_keep original_"
+    thumb_preview = "✅ Custom thumbnail set" if fw.get("thumbnail_path") else "_original thumbnail_"
     text = (
         f"{E['forward']} *Confirm Forward Job*\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
@@ -354,6 +401,7 @@ async def _show_confirm(message, ctx: ContextTypes.DEFAULT_TYPE, new_message: bo
         f"{E['plus']} *Destinations:*\n{dst_list}\n"
         f"{E['clock']} *Range:* `{fw['start_id']}` → `{fw['end_id']}` (*{fw['end_id'] - fw['start_id'] + 1}* msgs)\n"
         f"✏️ *Caption:* {caption_preview}\n"
+        f"🖼️ *Thumbnail:* {thumb_preview}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "Tap *Confirm* to start forwarding."
     )
@@ -424,7 +472,8 @@ async def fw_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             destinations=[d["id"] for d in fw["destinations"]],
             start_id=fw["start_id"],
             end_id=fw["end_id"],
-            caption=fw["caption"],
+            caption=fw.get("caption"),
+            thumbnail_path=fw.get("thumbnail_path"),
             progress_cb=on_progress,
             stop_event=stop_event,
         )
@@ -533,6 +582,10 @@ def register(app):
             CAPTION_INPUT: [
                 CallbackQueryHandler(fw_skip_caption, pattern="^fw_skip_caption$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, fw_caption),
+            ],
+            THUMBNAIL_INPUT: [
+                CallbackQueryHandler(fw_skip_thumbnail, pattern="^fw_skip_thumbnail$"),
+                MessageHandler(filters.PHOTO, fw_thumbnail),
             ],
         },
         fallbacks=[
