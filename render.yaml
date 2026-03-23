@@ -1,6 +1,7 @@
 services:
   - type: web             # Web service so Render assigns a public URL to ping
     name: autoforward-bot
+    pythonVersion: "3.11.0"
     runtime: python
     plan: free
     numInstances: 1       # Exactly 1 instance — no duplicate bots
