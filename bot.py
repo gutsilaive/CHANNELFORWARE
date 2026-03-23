@@ -23,7 +23,7 @@ try:
         asyncio.set_event_loop(_loop)
 
     from telegram import BotCommand
-    from telegram.ext import ApplicationBuilder
+    from telegram.ext import ApplicationBuilder, ContextTypes
 
     import config
     import handlers.start as start_h
@@ -39,6 +39,17 @@ try:
         ])
         logger.info("✅ Bot commands set.")
 
+    async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Suppress specific noisy errors from filling the logs."""
+        if context.error:
+            err_str = str(context.error)
+            if "Conflict: terminated by other getUpdates request" in err_str:
+                # Silence deployment overlap noise
+                return
+            if "Message is not modified" in err_str:
+                return
+            logger.error(f"Telegram API Exception: {context.error}")
+
     def main():
         app = (
             ApplicationBuilder()
@@ -47,6 +58,9 @@ try:
             .concurrent_updates(True)   # allow parallel message handling
             .build()
         )
+
+        app.add_error_handler(global_error_handler)
+
 
         # Register handlers in priority order
         start_h.register(app)

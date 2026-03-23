@@ -60,19 +60,24 @@ async def login_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return PHONE
 
     # First time — need API credentials
-    await update.callback_query.edit_message_text(
-        f"{E['key']} *Login — Step 1 of 4: API ID*\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "You need a Telegram API ID and Hash.\n\n"
-        f"*How to get them:*\n"
-        f"1. Go to [my.telegram.org](https://my.telegram.org/auth)\n"
-        f"2. Login → *API development tools*\n"
-        f"3. Create an app → copy **App api_id** and **App api_hash**\n\n"
-        f"Send your *API ID* (numbers only):",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=cancel_kb(),
-    )
+    try:
+        await update.callback_query.edit_message_text(
+            f"{E['key']} *Login — Step 1 of 4: API ID*\n"
+            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "You need a Telegram API ID and Hash.\n\n"
+            f"*How to get them:*\n"
+            f"1. Go to [my.telegram.org](https://my.telegram.org/auth)\n"
+            f"2. Login → *API development tools*\n"
+            f"3. Create an app → copy **App api_id** and **App api_hash**\n\n"
+            f"Send your *API ID* (numbers only):",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=cancel_kb(),
+        )
+    except Exception as e:
+        if "Message is not modified" not in str(e):
+            raise e
     return API_ID_INPUT
+
 
 
 async def got_api_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
