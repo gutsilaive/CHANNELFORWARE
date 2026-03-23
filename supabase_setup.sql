@@ -31,7 +31,16 @@ CREATE TABLE IF NOT EXISTS tasks (
 -- index for fast per-admin queries
 CREATE INDEX IF NOT EXISTS idx_tasks_admin ON tasks (admin_id, created_at DESC);
 
+-- ── api_credentials ───────────────────────────────────────
+CREATE TABLE IF NOT EXISTS api_credentials (
+    admin_id        BIGINT PRIMARY KEY,
+    api_id          BIGINT NOT NULL,
+    api_hash        TEXT NOT NULL,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- ── Row Level Security (optional but recommended) ─────────
 -- Disable public access; only service key can write
-ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE tasks    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sessions         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tasks            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE api_credentials  ENABLE ROW LEVEL SECURITY;

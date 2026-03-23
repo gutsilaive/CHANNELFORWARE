@@ -6,7 +6,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
 
-from database import get_session
+from database import get_session, get_api_credentials
 from userbot import get_joined_channels
 from handlers.ui import E, back_kb
 from handlers.start import _require_admin
@@ -40,20 +40,21 @@ async def ch_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     await update.callback_query.answer()
 
+    msg = await update.callback_query.edit_message_text(
+        f"{E['refresh']} Fetching your channels… please wait."
+    )
+
     session = get_session(uid)
-    if not session:
-        await update.callback_query.edit_message_text(
+    creds = get_api_credentials(uid)
+    if not session or not creds:
+        await msg.edit_text(
             f"{E['error']} You are not logged in. Go back and login first.",
             reply_markup=back_kb("home"),
         )
         return
 
-    msg = await update.callback_query.edit_message_text(
-        f"{E['refresh']} Fetching your channels… please wait."
-    )
-
     try:
-        channels = await get_joined_channels(session)
+        channels = await get_joined_channels(session, creds["api_id"], creds["api_hash"])
         ctx.user_data["channels"] = channels
     except Exception as e:
         await msg.edit_text(
@@ -73,10 +74,10 @@ async def ch_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
         f"{E['channel']} *Your Channels*\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Found *{len(channels)}* channels\\. Tap one for details."
+        f"Found *{len(channels)}* channels. Tap one for details."
     )
     await msg.edit_text(
-        text, parse_mode="MarkdownV2",
+        text, parse_mode=ParseMode.MARKDOWN,
         reply_markup=_channels_kb(channels, 0),
     )
 

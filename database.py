@@ -42,6 +42,35 @@ def delete_session(admin_id: int) -> None:
     _client.table("sessions").delete().eq("admin_id", admin_id).execute()
 
 
+# ─────────────────────────────  API Credentials  ─────────────────────────────
+
+def get_api_credentials(admin_id: int) -> dict | None:
+    """Return {api_id, api_hash} for this admin, or None if not saved."""
+    res = (
+        _client.table("api_credentials")
+        .select("api_id, api_hash")
+        .eq("admin_id", admin_id)
+        .limit(1)
+        .execute()
+    )
+    if res.data:
+        return {"api_id": res.data[0]["api_id"], "api_hash": res.data[0]["api_hash"]}
+    return None
+
+
+def save_api_credentials(admin_id: int, api_id: int, api_hash: str) -> None:
+    """Upsert API credentials for this admin."""
+    _client.table("api_credentials").upsert(
+        {
+            "admin_id": admin_id,
+            "api_id": api_id,
+            "api_hash": api_hash,
+            "updated_at": datetime.datetime.utcnow().isoformat(),
+        },
+        on_conflict="admin_id",
+    ).execute()
+
+
 # ─────────────────────────────  Tasks  ───────────────────────────────────────
 
 def create_task(

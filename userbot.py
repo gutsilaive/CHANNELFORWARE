@@ -29,29 +29,23 @@ import config
 
 # ─────────────────────────────  Helpers  ─────────────────────────────────────
 
-def _make_client(session_string: str | None = None) -> Client:
+def _make_client(api_id: int, api_hash: str, session_string: str | None = None) -> Client:
     """Create a Pyrogram in-memory client."""
     return Client(
         name="autoforward_user",
-        api_id=config.API_ID,
-        api_hash=config.API_HASH,
+        api_id=api_id,
+        api_hash=api_hash,
         session_string=session_string,
         in_memory=True,
     )
 
 
-def _is_invite_link(text: str) -> bool:
-    return bool(re.match(r"https?://t(?:elegram)?\.me/(\+|joinchat/)", text))
-
-
 def _channel_id_from_text(text: str) -> str:
     """Strip URL fluff to leave username or +hash."""
     text = text.strip()
-    # t.me/joinchat/HASH or t.me/+HASH
     m = re.match(r"https?://t\.me/(?:joinchat/)?(\S+)", text)
     if m:
         return m.group(1)
-    # @channel
     if text.startswith("@"):
         return text
     return text
@@ -66,22 +60,24 @@ class LoginSession:
         self.client: Client | None = None
         self.phone: str = ""
         self.phone_code_hash: str = ""
-        self._password_needed: bool = False
+        self.api_id: int = 0
+        self.api_hash: str = ""
 
-    async def start_login(self, phone: str) -> str:
-        """Start login, returns OTP sent confirmation string."""
+    async def start_login(self, phone: str, api_id: int, api_hash: str) -> str:
+        """Start login, returns OTP type string (e.g. 'APP' or 'SMS')."""
         self.phone = phone.strip()
-        self.client = _make_client()
+        self.api_id = api_id
+        self.api_hash = api_hash
+        self.client = _make_client(api_id, api_hash)
         await self.client.connect()
         sent = await self.client.send_code(self.phone)
         self.phone_code_hash = sent.phone_code_hash
-        return sent.type.name  # e.g. "APP" or "SMS"
+        return sent.type.name
 
     async def submit_code(self, code: str) -> tuple[bool, str]:
         """
-        Submit OTP. Returns (needs_password, session_string_or_error).
+        Submit OTP. Returns (needs_password, session_string).
         If needs_password is True, call submit_password next.
-        If False, session_string is ready.
         """
         try:
             await self.client.sign_in(
@@ -92,7 +88,6 @@ class LoginSession:
             session_string = await self.client.export_session_string()
             return False, session_string
         except SessionPasswordNeeded:
-            self._password_needed = True
             return True, ""
         except PhoneCodeInvalid:
             raise ValueError("❌ The OTP code you entered is incorrect.")
@@ -115,10 +110,10 @@ class LoginSession:
 
 # ─────────────────────────────  Channel helpers  ─────────────────────────────
 
-async def get_joined_channels(session_string: str) -> list[dict]:
+async def get_joined_channels(session_string: str, api_id: int, api_hash: str) -> list[dict]:
     """Return list of dicts: {id, title, username, type}."""
     results = []
-    async with _make_client(session_string) as client:
+    async with _make_client(api_id, api_hash, session_string) as client:
         async for dialog in client.get_dialogs():
             chat: Chat = dialog.chat
             if chat.type.name in ("CHANNEL", "SUPERGROUP", "GROUP"):
@@ -133,18 +128,16 @@ async def get_joined_channels(session_string: str) -> list[dict]:
     return results
 
 
-async def resolve_and_join_channel(session_string: str, link_or_username: str) -> dict:
+async def resolve_and_join_channel(
+    session_string: str, api_id: int, api_hash: str, link_or_username: str
+) -> dict:
     """
-    Given a public username, @username, channel link, or private invite link:
-    - Resolve to a chat object
-    - Join if not already a member
-    Returns: {id, title, username}
-    Raises: ValueError with user-friendly message on any error
+    Resolve a channel from username/link/invite and auto-join if needed.
+    Returns {id, title, username}. Raises ValueError with user-friendly message on error.
     """
-    async with _make_client(session_string) as client:
+    async with _make_client(api_id, api_hash, session_string) as client:
         target = _channel_id_from_text(link_or_username)
 
-        # Private invite link (+hash)
         if target.startswith("+"):
             try:
                 chat = await client.join_chat(target)
@@ -154,7 +147,6 @@ async def resolve_and_join_channel(session_string: str, link_or_username: str) -
                     "username": f"@{chat.username}" if chat.username else str(chat.id),
                 }
             except UserAlreadyParticipant:
-                # Already joined — just resolve
                 pass
             except InviteHashExpired:
                 raise ValueError("❌ This invite link has expired.")
@@ -163,7 +155,6 @@ async def resolve_and_join_channel(session_string: str, link_or_username: str) -
             except Exception as e:
                 raise ValueError(f"❌ Could not join via invite link: {e}")
 
-        # Public @username or numeric ID
         try:
             chat = await client.get_chat(target)
         except ChannelPrivate:
@@ -171,7 +162,6 @@ async def resolve_and_join_channel(session_string: str, link_or_username: str) -
         except Exception as e:
             raise ValueError(f"❌ Could not resolve channel: {e}")
 
-        # Try to join if not already a member
         try:
             await client.join_chat(target)
         except UserAlreadyParticipant:
@@ -189,11 +179,12 @@ async def resolve_and_join_channel(session_string: str, link_or_username: str) -
 # ─────────────────────────────  Forward engine  ──────────────────────────────
 
 ProgressCallback = Callable[[int, int, int], Awaitable[None]]
-# called with (forwarded_count, total, errors)
 
 
 async def forward_messages(
     session_string: str,
+    api_id: int,
+    api_hash: str,
     source: str | int,
     destinations: list[str | int],
     start_id: int,
@@ -203,16 +194,15 @@ async def forward_messages(
     stop_event: asyncio.Event | None = None,
 ) -> dict:
     """
-    Copy messages from source to each destination without "Forwarded" tag.
-    Uses copy_message() — no origin shown.
-    Returns: {forwarded: int, errors: int, skipped: int}
+    Copy messages without "Forwarded" tag using copy_message().
+    Returns {forwarded, errors, skipped}.
     """
     forwarded = 0
     errors = 0
     skipped = 0
     total = end_id - start_id + 1
 
-    async with _make_client(session_string) as client:
+    async with _make_client(api_id, api_hash, session_string) as client:
         for msg_id in range(start_id, end_id + 1):
             if stop_event and stop_event.is_set():
                 break
@@ -236,7 +226,6 @@ async def forward_messages(
                 skipped += 1
                 continue
 
-            # Determine effective caption
             effective_caption = caption if caption is not None else (msg.caption or msg.text or "")
 
             for dest in destinations:
@@ -261,9 +250,7 @@ async def forward_messages(
                     except Exception:
                         errors += 1
                 except ChatAdminRequired:
-                    raise ValueError(
-                        f"❌ Bot/account needs Admin rights in destination: {dest}"
-                    )
+                    raise ValueError(f"❌ Account needs posting rights in destination: {dest}")
                 except Exception:
                     errors += 1
 
@@ -271,7 +258,6 @@ async def forward_messages(
             if progress_cb and forwarded % config.PROGRESS_INTERVAL == 0:
                 await progress_cb(forwarded, total, errors)
 
-            # Small delay to avoid flood
             await asyncio.sleep(0.3)
 
     return {"forwarded": forwarded, "errors": errors, "skipped": skipped}
