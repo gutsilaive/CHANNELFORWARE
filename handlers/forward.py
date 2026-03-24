@@ -236,12 +236,13 @@ async def fw_src_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def _show_dst(message, ctx, new=False):
     fw = ctx.user_data["fw"]
     dests = fw["destinations"]
+    dests_str = ("*Added:*  " + ", ".join(f"`{d['title'][:20]}`" for d in dests)) if dests else "_None added yet_"
     text = (
         f"{E['forward']} *Forward — Step 2/5  · Destinations*\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"Source: `{fw['source_title']}`\n\n"
         f"Add the channel(s)/group(s) to forward *to*.\n"
-        f"{'*Added:*  ' + ', '.join(f'`{d[\"title\"][:20]}`' for d in dests) if dests else '_None added yet_'}"
+        f"{dests_str}"
     )
     kb = _dst_kb(dests)
     try:
