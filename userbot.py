@@ -193,10 +193,10 @@ async def forward_messages(
 ) -> dict:
     """
     Copy messages without 'Forwarded from' header using copy_message().
-    caption=None  → keep original caption
-    caption=''    → strip all captions
-    caption='...' → replace with this text
-    thumbnail_path → replace thumbnail on video/document messages
+    caption=None  → keep original caption on media; text messages unchanged
+    caption=''    → strip caption from media; text messages unchanged
+    caption='...' → replace caption on media only; text messages unchanged
+    thumbnail_path → replace thumbnail on video/document only
     Returns {forwarded, errors, skipped}.
     """
     forwarded = 0
@@ -204,6 +204,9 @@ async def forward_messages(
     skipped = 0
     total = end_id - start_id + 1
     last_error: str | None = None
+
+    # Message types that can carry a caption
+    MEDIA_TYPES = ("video", "photo", "audio", "document", "animation", "voice", "video_note", "sticker")
 
     async with _make_client(session_string=session_string) as client:
         for msg_id in range(start_id, end_id + 1):
@@ -218,26 +221,44 @@ async def forward_messages(
                 try:
                     msg = await client.get_messages(source, msg_id)
                 except Exception as e2:
-                    errors += 1
-                    last_error = str(e2)
-                    continue
+                    errors += 1; last_error = str(e2); continue
             except MessageIdInvalid:
-                skipped += 1
-                continue
+                skipped += 1; continue
             except Exception as e:
-                errors += 1
-                last_error = str(e)
-                continue
+                errors += 1; last_error = str(e); continue
 
             if msg is None or msg.empty:
                 skipped += 1
                 continue
 
-            # ── Caption ───────────────────────────────────────────────────────
-            if caption is not None:
+            # ── Determine message type ─────────────────────────────────────────
+            is_text_only = (
+                msg.text is not None and
+                msg.video is None and msg.photo is None and
+                msg.audio is None and msg.document is None and
+                msg.animation is None and msg.voice is None and
+                msg.sticker is None and msg.poll is None
+            )
+            is_media = any(getattr(msg, t, None) is not None for t in MEDIA_TYPES)
+            has_video = msg.video is not None
+            has_document = msg.document is not None
+            can_have_thumbnail = has_video or has_document
+
+            # ── Caption logic ─────────────────────────────────────────────────
+            # Text-only messages always go through unchanged.
+            # For media: apply custom caption if set, else keep original.
+            if is_text_only:
+                # Pure text — send without any caption override
+                effective_caption = None
+                override_caption = False
+            elif is_media and caption is not None:
+                # Media + user provided a caption override
                 effective_caption = caption if caption else None
+                override_caption = True
             else:
-                effective_caption = msg.caption or msg.text or None
+                # Media without override — keep original
+                effective_caption = msg.caption or None
+                override_caption = False
 
             parse_mode = "markdown" if effective_caption else None
 
@@ -245,11 +266,11 @@ async def forward_messages(
             sent_ok = 0
             for dest in destinations:
                 try:
-                    if thumbnail_path and (msg.video or msg.document):
-                        # Re-upload with custom thumbnail
+                    if thumbnail_path and can_have_thumbnail:
+                        # Download → re-upload with custom thumbnail
                         try:
                             dl_path = await client.download_media(msg, in_memory=False)
-                            if msg.video:
+                            if has_video:
                                 await client.send_video(
                                     chat_id=dest,
                                     video=dl_path,
@@ -270,21 +291,29 @@ async def forward_messages(
                             except Exception:
                                 pass
                         except Exception:
-                            # Thumbnail upload failed — fall back to normal copy
+                            # Thumbnail failed — fall back to regular copy
                             await client.copy_message(
                                 chat_id=dest,
                                 from_chat_id=source,
                                 message_id=msg_id,
-                                caption=effective_caption,
+                                caption=effective_caption if override_caption else msg.caption,
                                 parse_mode=parse_mode,
                             )
-                    else:
+                    elif override_caption and is_media:
+                        # Media with custom caption — use copy_message with override
                         await client.copy_message(
                             chat_id=dest,
                             from_chat_id=source,
                             message_id=msg_id,
                             caption=effective_caption,
                             parse_mode=parse_mode,
+                        )
+                    else:
+                        # Text or media with no override — copy as-is (no caption param)
+                        await client.copy_message(
+                            chat_id=dest,
+                            from_chat_id=source,
+                            message_id=msg_id,
                         )
                     sent_ok += 1
                 except FloodWait as e:
@@ -294,27 +323,22 @@ async def forward_messages(
                             chat_id=dest,
                             from_chat_id=source,
                             message_id=msg_id,
-                            caption=effective_caption,
-                            parse_mode=parse_mode,
+                            caption=effective_caption if override_caption else None,
+                            parse_mode=parse_mode if override_caption else None,
                         )
                         sent_ok += 1
                     except Exception as e2:
-                        errors += 1
-                        last_error = str(e2)
+                        errors += 1; last_error = str(e2)
                 except ChatAdminRequired:
                     raise ValueError(
                         f"❌ No posting rights in destination `{dest}`.\n"
-                        "Make sure the user account is an admin with 'Post Messages' permission."
+                        "Make sure the user account has 'Post Messages' permission."
                     )
                 except Exception as e:
-                    errors += 1
-                    last_error = str(e)
+                    errors += 1; last_error = str(e)
 
             if sent_ok > 0:
                 forwarded += 1
-            elif destinations:
-                # All dests failed — don't double-count as skipped
-                skipped = max(0, skipped)
 
             if progress_cb and (forwarded % max(1, config.PROGRESS_INTERVAL) == 0):
                 await progress_cb(forwarded, total, errors)
@@ -325,3 +349,4 @@ async def forward_messages(
     if last_error and forwarded == 0:
         result["last_error"] = last_error
     return result
+
