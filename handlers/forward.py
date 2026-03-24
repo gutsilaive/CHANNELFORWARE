@@ -22,7 +22,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 from database import get_session, create_task, update_task_progress, finish_task
-from userbot import get_joined_channels, resolve_and_join_channel, forward_messages
+from userbot import get_joined_channels, resolve_and_join_channel, forward_messages, get_latest_message_id
 from handlers.ui import E, back_kb, progress_bar, pct
 from handlers.start import _require_admin
 import config
@@ -42,9 +42,10 @@ def _src_kb(channels: list[dict], page: int) -> InlineKeyboardMarkup:
     total = max(1, math.ceil(len(channels) / PAGE))
     rows = []
     for ch in channels[page * PAGE: page * PAGE + PAGE]:
+        # callback_data must be < 64 bytes — only store the ID
         rows.append([InlineKeyboardButton(
             f"📢 {ch['title'][:30]}",
-            callback_data=f"fw_src:{ch['id']}:{ch['title'][:20]}"
+            callback_data=f"fw_src:{ch['id']}"
         )])
     nav = []
     if page > 0:
@@ -161,11 +162,15 @@ async def fw_srcpg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def fw_src_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Tapped a channel button as source."""
+    """Tapped a channel button as source — look up title from cache."""
     await update.callback_query.answer()
-    parts = update.callback_query.data.split(":", 2)
-    ctx.user_data["fw"]["source_id"] = int(parts[1])
-    ctx.user_data["fw"]["source_title"] = parts[2] if len(parts) > 2 else parts[1]
+    parts = update.callback_query.data.split(":")
+    ch_id = int(parts[1])
+    # Look up title from cached channels
+    channels = ctx.user_data.get("fw_channels", [])
+    ch = next((c for c in channels if c["id"] == ch_id), None)
+    ctx.user_data["fw"]["source_id"] = ch_id
+    ctx.user_data["fw"]["source_title"] = ch["title"] if ch else str(ch_id)
     await _show_dst(update.callback_query.message, ctx)
     return DST
 
@@ -310,13 +315,29 @@ async def fw_range(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text.strip().replace(",", " ").replace("-", " ")
     parts = [p for p in raw.split() if p.isdigit()]
 
+    uid = update.effective_user.id
+    session = get_session(uid)
+    fw = ctx.user_data["fw"]
+
     if len(parts) == 1:
-        start_id, end_id = 1, int(parts[0])
+        # User gave a count — resolve to the LAST N actual messages
+        count = int(parts[0])
+        wait = await update.message.reply_text(f"{E['refresh']} Checking latest message ID…")
+        latest = await get_latest_message_id(session, fw["source_id"])
+        await wait.delete()
+        if not latest:
+            await update.message.reply_text(
+                f"{E['error']} Could not fetch latest message. Try using `start end` format (e.g. `1000 1100`).",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return RANGE
+        end_id = latest
+        start_id = max(1, latest - count + 1)
     elif len(parts) >= 2:
         start_id, end_id = int(parts[0]), int(parts[1])
     else:
         await update.message.reply_text(
-            f"{E['warn']} Send a number like `100` or a range like `1 500`.",
+            f"{E['warn']} Send a number like `100` (last 100 msgs) or range like `1000 1100`.",
             parse_mode=ParseMode.MARKDOWN,
         )
         return RANGE
@@ -326,15 +347,14 @@ async def fw_range(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     cap = config.MAX_FORWARD
     if end_id - start_id + 1 > cap:
-        end_id = start_id + cap - 1
+        start_id = end_id - cap + 1
         await update.message.reply_text(
-            f"{E['warn']} Capped to `{cap}` messages. End = `{end_id}`.",
+            f"{E['warn']} Capped to `{cap}` messages. Start adjusted to `{start_id}`.",
             parse_mode=ParseMode.MARKDOWN,
         )
 
     ctx.user_data["fw"]["start_id"] = start_id
     ctx.user_data["fw"]["end_id"] = end_id
-    fw = ctx.user_data["fw"]
 
     await update.message.reply_text(
         f"{E['forward']} *Forward — Step 4/5  · Caption*\n"
@@ -593,9 +613,9 @@ def register(app):
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(fw_start, pattern="^fw_start$")],
         states={
-            SRC: [
+                SRC: [
                 CallbackQueryHandler(fw_srcpg,      pattern=r"^fw_srcpg:\d+$"),
-                CallbackQueryHandler(fw_src_pick,   pattern=r"^fw_src:-?\d+:"),
+                CallbackQueryHandler(fw_src_pick,   pattern=r"^fw_src:-?\d+$"),
                 CallbackQueryHandler(fw_src_manual, pattern="^fw_src_manual$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, fw_src_text),
             ],

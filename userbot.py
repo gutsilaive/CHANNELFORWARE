@@ -175,7 +175,17 @@ def _chat_dict(chat) -> dict:
     }
 
 
-# ─────────────────────────────  Forward engine  ──────────────────────────────
+async def get_latest_message_id(session_string: str, channel_id: int) -> int | None:
+    """Return the ID of the most recent message in a channel, or None on failure."""
+    async with _make_client(session_string=session_string) as client:
+        try:
+            async for msg in client.get_chat_history(channel_id, limit=1):
+                return msg.id
+        except Exception:
+            pass
+    return None
+
+
 
 ProgressCallback = Callable[[int, int, int], Awaitable[None]]
 
