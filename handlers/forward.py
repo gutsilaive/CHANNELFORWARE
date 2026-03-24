@@ -199,7 +199,6 @@ async def fw_src_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif awaiting == "destination":
         dests = ctx.user_data["fw"]["destinations"]
-        # Prevent duplicate
         if not any(d["id"] == info["id"] for d in dests):
             dests.append(info)
         ctx.user_data.pop("_awaiting", None)
@@ -207,7 +206,8 @@ async def fw_src_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _refresh_dst_message(update.message, ctx, new_message=True)
         return DST_INPUT
 
-    return SRC_INPUT
+    # Default — stay in current state
+    return DST_INPUT
 
 
 # ─────────────────────────────  Step 2: Destinations  ────────────────────────
@@ -566,7 +566,10 @@ async def fw_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────  DST text during conv  ────────────────────────
 
 async def fw_dst_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Text received while expecting a destination entry."""
+    """Text received while in DST_INPUT state — always treat as destination input."""
+    # Ensure _awaiting is set so fw_src_text routes correctly
+    if not ctx.user_data.get("_awaiting"):
+        ctx.user_data["_awaiting"] = "destination"
     return await fw_src_text(update, ctx)
 
 
@@ -603,7 +606,7 @@ def register(app):
         },
         fallbacks=[
             CallbackQueryHandler(fw_cancel, pattern="^fw_cancel$"),
-            CallbackQueryHandler(cancel_kb, pattern="^cancel$"),
+            CallbackQueryHandler(fw_cancel, pattern="^cancel$"),
             CommandHandler("start", fw_cancel),
         ],
         allow_reentry=True,
