@@ -176,15 +176,20 @@ def _chat_dict(chat) -> dict:
 
 
 async def get_latest_message_id(session_string: str, channel_id: int) -> int | None:
-    """Return the ID of the most recent message in a channel, or None on failure."""
+    """
+    Return the ID of the most recent message in a channel.
+    Uses get_dialogs so the peer cache is populated as a side effect.
+    """
     async with _make_client(session_string=session_string) as client:
         try:
-            async for msg in client.get_chat_history(channel_id, limit=1):
-                return msg.id
+            async for dialog in client.get_dialogs(limit=500):
+                if dialog.chat.id == channel_id:
+                    if dialog.top_message:
+                        return dialog.top_message.id
+                    return None
         except Exception:
             pass
     return None
-
 
 
 ProgressCallback = Callable[[int, int, int], Awaitable[None]]
@@ -219,6 +224,21 @@ async def forward_messages(
     MEDIA_TYPES = ("video", "photo", "audio", "document", "animation", "voice", "video_note", "sticker")
 
     async with _make_client(session_string=session_string) as client:
+        # ── Warm up peer cache ──────────────────────────────────────────────────
+        # A fresh in_memory Pyrogram client has an empty peer cache.
+        # Scanning get_dialogs populates it so get_messages/copy_message can
+        # resolve channels by numeric ID without raising PeerIdInvalid.
+        needed_ids = {source} | {d for d in destinations}
+        found_ids: set = set()
+        try:
+            async for dialog in client.get_dialogs(limit=500):
+                if dialog.chat.id in needed_ids:
+                    found_ids.add(dialog.chat.id)
+                if found_ids >= needed_ids:
+                    break  # All peers resolved, stop early
+        except Exception:
+            pass  # Even partial warmup helps
+
         for msg_id in range(start_id, end_id + 1):
             if stop_event and stop_event.is_set():
                 break
