@@ -272,11 +272,12 @@ async def fw_dst_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"{E['channel']} Source: `{fw['source_title']}`\n"
         f"{E['plus']} Destinations: *{len(fw['destinations'])}* channel(s)\n\n"
-        f"*Set Message Range*\n"
-        "Send the start and end message IDs separated by a space:\n\n"
-        "`<start_id> <end_id>`\n\n"
-        "_Example: `1 500`  (forwards messages 1 through 500)_\n"
-        f"_Max: {config.MAX_FORWARD} messages per run._",
+        f"*📋 Set Message Range*\n\n"
+        "Send in one of these formats:\n"
+        "• `100` — forward the last 100 messages\n"
+        "• `1 500` — forward messages 1 through 500\n"
+        "• `1-500` — same as above\n\n"
+        f"_Max: {config.MAX_FORWARD} messages per job._",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=cancel_kb(),
     )
@@ -286,23 +287,34 @@ async def fw_dst_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────  Step 3: Range  ───────────────────────────────
 
 async def fw_range(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+    text = update.message.text.strip().replace("-", " ").replace(",", " ")
     parts = text.split()
-    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+
+    start_id, end_id = None, None
+
+    if len(parts) == 1 and parts[0].isdigit():
+        # Count only — forward last N messages
+        count = int(parts[0])
+        end_id = count
+        start_id = 1
+    elif len(parts) == 2 and all(p.isdigit() for p in parts):
+        start_id, end_id = int(parts[0]), int(parts[1])
+    else:
         await update.message.reply_text(
-            f"{E['warn']} Invalid format. Send two numbers:\n`<start_id> <end_id>`\n\nExample: `1 500`",
+            f"{E['warn']} Invalid format. Try:\n"
+            "`100` — last 100 messages\n"
+            "`1 500` — messages 1 to 500",
             parse_mode=ParseMode.MARKDOWN,
         )
         return RANGE_INPUT
 
-    start_id, end_id = int(parts[0]), int(parts[1])
     if start_id > end_id:
-        await update.message.reply_text(f"{E['warn']} Start ID must be less than or equal to End ID.")
-        return RANGE_INPUT
+        start_id, end_id = end_id, start_id  # auto-swap
+
     if end_id - start_id + 1 > config.MAX_FORWARD:
         end_id = start_id + config.MAX_FORWARD - 1
         await update.message.reply_text(
-            f"{E['warn']} Range capped to {config.MAX_FORWARD} messages. End ID adjusted to `{end_id}`.",
+            f"{E['warn']} Range capped to `{config.MAX_FORWARD}` messages. End adjusted to `{end_id}`.",
             parse_mode=ParseMode.MARKDOWN,
         )
 
@@ -317,7 +329,7 @@ async def fw_range(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"{E['plus']} Destinations: *{len(fw['destinations'])}* channel(s)\n"
         f"{E['clock']} Range: `{start_id}` → `{end_id}` (*{end_id - start_id + 1}* messages)\n\n"
         f"*Custom Caption (optional)*\n"
-        "Send a caption to replace original captions, or press Skip:",
+        "Send a caption to replace all original captions,\nor press Skip to keep originals:",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("⏭ Skip (keep original)", callback_data="fw_skip_caption")],
@@ -325,6 +337,7 @@ async def fw_range(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ]),
     )
     return CAPTION_INPUT
+
 
 
 # ─────────────────────────────  Step 4: Caption  ─────────────────────────────
