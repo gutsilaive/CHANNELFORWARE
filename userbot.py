@@ -312,7 +312,23 @@ async def forward_messages(
             is_media = any(getattr(msg, t, None) is not None for t in MEDIA_TYPES)
             has_video = msg.video is not None
             has_document = msg.document is not None
-                 # ── Send to each destination ──────────────────────────────────────
+            can_have_thumbnail = has_video or has_document
+
+            # ── Caption logic ─────────────────────────────────────────────────
+            if is_text_only:
+                effective_caption = None
+                override_caption = False
+            elif is_media and caption is not None:
+                effective_caption = caption if caption else None
+                override_caption = True
+            else:
+                effective_caption = msg.caption or None
+                override_caption = False
+
+            # Sent as plain text to avoid Markdown errors on special characters
+            parse_mode = None
+
+            # ── Send to each destination ──────────────────────────────────────
             sent_ok = 0
             for dest in destinations:
 

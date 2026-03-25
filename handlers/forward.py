@@ -527,6 +527,7 @@ async def fw_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         fwd = result.get("forwarded", 0)
         err = result.get("errors", 0)
+        skp = result.get("skipped", 0)
         dst = ", ".join(f"`{d['title'][:20]}`" for d in fw["destinations"])
         status_icon = "⏹" if stopped else ("✅" if err == 0 else "⚠️")
         final = (
@@ -536,6 +537,7 @@ async def fw_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"📥 To: {dst}\n\n"
             f"✅ Forwarded: *{fwd}*\n"
             f"❌ Errors: *{err}*\n"
+            f"⏭️ Skipped (empty/deleted): *{skp}*\n"
         )
         if result.get("last_error"):
             final += f"\n⚠️ Last error: `{result['last_error'][:80]}`\n"
