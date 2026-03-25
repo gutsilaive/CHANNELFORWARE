@@ -18,6 +18,7 @@ from pyrogram.errors import (
     ChatAdminRequired,
     ChannelPrivate,
     MessageIdInvalid,
+    PeerIdInvalid,
 )
 from pyrogram.types import Chat, Message
 
@@ -311,102 +312,93 @@ async def forward_messages(
             is_media = any(getattr(msg, t, None) is not None for t in MEDIA_TYPES)
             has_video = msg.video is not None
             has_document = msg.document is not None
-            can_have_thumbnail = has_video or has_document
-
-            # ── Caption logic ─────────────────────────────────────────────────
-            # Text-only messages always go through unchanged.
-            # For media: apply custom caption if set, else keep original.
-            if is_text_only:
-                # Pure text — send without any caption override
-                effective_caption = None
-                override_caption = False
-            elif is_media and caption is not None:
-                # Media + user provided a caption override
-                effective_caption = caption if caption else None
-                override_caption = True
-            else:
-                # Media without override — keep original
-                effective_caption = msg.caption or None
-                override_caption = False
-
-            # Captions are always sent as plain text (no parse_mode).
-            # This prevents BadRequest errors from special Markdown characters.
-            parse_mode = None
-
-            # ── Send to all destinations ──────────────────────────────────────
+                 # ── Send to each destination ──────────────────────────────────────
             sent_ok = 0
             for dest in destinations:
-                try:
+
+                async def _send_to(dest_id):
+                    """Inner helper — raises on error so caller can retry."""
                     if thumbnail_path and can_have_thumbnail:
-                        # Download → re-upload with custom thumbnail
+                        # Download original → re-upload with custom thumbnail
+                        dl_path = None
                         try:
                             dl_path = await client.download_media(msg, in_memory=False)
+                            if dl_path is None:
+                                raise ValueError("download_media returned None")
                             if has_video:
                                 await client.send_video(
-                                    chat_id=dest,
+                                    chat_id=dest_id,
                                     video=dl_path,
                                     caption=effective_caption,
-                                    parse_mode=parse_mode,
                                     thumb=thumbnail_path,
                                 )
                             else:
                                 await client.send_document(
-                                    chat_id=dest,
+                                    chat_id=dest_id,
                                     document=dl_path,
                                     caption=effective_caption,
-                                    parse_mode=parse_mode,
                                     thumb=thumbnail_path,
                                 )
-                            try:
-                                os.remove(dl_path)
-                            except Exception:
-                                pass
-                        except Exception:
-                            # Thumbnail failed — fall back to regular copy
-                            await client.copy_message(
-                                chat_id=dest,
-                                from_chat_id=source,
-                                message_id=msg_id,
-                                caption=effective_caption if override_caption else msg.caption,
-                                parse_mode=parse_mode,
-                            )
-                    elif override_caption and is_media:
-                        # Media with custom caption — use copy_message with override
+                        finally:
+                            if dl_path:
+                                try:
+                                    os.remove(dl_path)
+                                except Exception:
+                                    pass
+
+                    elif override_caption:
+                        # Media with custom caption only (no thumbnail)
                         await client.copy_message(
-                            chat_id=dest,
+                            chat_id=dest_id,
                             from_chat_id=source,
                             message_id=msg_id,
                             caption=effective_caption,
-                            parse_mode=parse_mode,
                         )
+
                     else:
-                        # Text or media with no override — copy as-is (no caption param)
+                        # Text or media with no overrides — copy exactly as-is
                         await client.copy_message(
-                            chat_id=dest,
+                            chat_id=dest_id,
                             from_chat_id=source,
                             message_id=msg_id,
                         )
+
+                try:
+                    await _send_to(dest)
                     sent_ok += 1
+
+                except PeerIdInvalid:
+                    # Peer not in cache — scan ALL dialogs to force-resolve it
+                    try:
+                        async for dialog in client.get_dialogs():
+                            if dialog.chat.id == dest:
+                                break
+                    except Exception:
+                        pass
+                    # Retry once after forced resolution
+                    try:
+                        await _send_to(dest)
+                        sent_ok += 1
+                    except Exception as e2:
+                        errors += 1
+                        last_error = str(e2)
+
                 except FloodWait as e:
                     await asyncio.sleep(e.value + 1)
                     try:
-                        await client.copy_message(
-                            chat_id=dest,
-                            from_chat_id=source,
-                            message_id=msg_id,
-                            caption=effective_caption if override_caption else None,
-                            parse_mode=parse_mode if override_caption else None,
-                        )
+                        await _send_to(dest)
                         sent_ok += 1
                     except Exception as e2:
-                        errors += 1; last_error = str(e2)
+                        errors += 1
+                        last_error = str(e2)
+
                 except ChatAdminRequired:
-                    raise ValueError(
-                        f"❌ No posting rights in destination `{dest}`.\n"
-                        "Make sure the user account has 'Post Messages' permission."
-                    )
+                    errors += 1
+                    last_error = f"No posting rights in destination {dest}"
+
                 except Exception as e:
-                    errors += 1; last_error = str(e)
+                    errors += 1
+                    last_error = str(e)
 
             if sent_ok > 0:
                 forwarded += 1
