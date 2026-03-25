@@ -110,7 +110,7 @@ async def fw_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Init state
     ctx.user_data["fw"] = {
-        "source_id": None, "source_title": None,
+        "source_id": None, "source_title": None, "source_ref": None,
         "start_id": None, "end_id": None,
         "msg_link_raw": None,
         "destinations": [],
@@ -162,6 +162,7 @@ async def fw_src_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     ctx.user_data["fw"]["source_id"] = info["id"]
     ctx.user_data["fw"]["source_title"] = info["title"]
+    ctx.user_data["fw"]["source_ref"] = text  # keep original for peer fallback
     await wait.delete()
 
     await update.message.reply_text(
@@ -372,6 +373,8 @@ async def fw_dst_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     dests = ctx.user_data["fw"]["destinations"]
     if not any(d["id"] == info["id"] for d in dests):
+        # Store username for peer fallback resolution
+        info.setdefault("ref", text)
         dests.append(info)
 
     await wait.delete()
@@ -507,6 +510,8 @@ async def fw_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             thumbnail_path=fw.get("thumbnail_path"),
             progress_cb=on_progress,
             stop_event=stop_ev,
+            source_ref=fw.get("source_ref"),
+            dest_refs=[d.get("ref", d.get("username", "")) for d in fw["destinations"]],
         )
         stopped = stop_ev.is_set()
         finish_task(task_id, status="stopped" if stopped else "done")

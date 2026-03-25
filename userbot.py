@@ -214,6 +214,8 @@ async def forward_messages(
     thumbnail_path: str | None = None,
     progress_cb: ProgressCallback | None = None,
     stop_event: asyncio.Event | None = None,
+    source_ref: str | None = None,       # original text typed by user (for fallback resolve)
+    dest_refs: list[str] | None = None,  # username/link per destination (for fallback resolve)
 ) -> dict:
     """
     Copy messages without 'Forwarded from' header using copy_message().
@@ -233,20 +235,38 @@ async def forward_messages(
     MEDIA_TYPES = ("video", "photo", "audio", "document", "animation", "voice", "video_note", "sticker")
 
     async with _make_client(session_string=session_string) as client:
-        # ── Warm up peer cache ──────────────────────────────────────────────────
-        # A fresh in_memory Pyrogram client has an empty peer cache.
-        # Scanning get_dialogs populates it so get_messages/copy_message can
-        # resolve channels by numeric ID without raising PeerIdInvalid.
-        needed_ids = {source} | {d for d in destinations}
+        # ── Warm up peer cache via dialogs ────────────────────────────────────────
+        needed_ids: set = {source} | {d for d in destinations}
         found_ids: set = set()
         try:
             async for dialog in client.get_dialogs(limit=500):
                 if dialog.chat.id in needed_ids:
                     found_ids.add(dialog.chat.id)
                 if found_ids >= needed_ids:
-                    break  # All peers resolved, stop early
+                    break
         except Exception:
-            pass  # Even partial warmup helps
+            pass
+
+        # ── Fallback: resolve any unfound peers by username/link ───────────────────
+        missing = needed_ids - found_ids
+        if missing:
+            refs_to_try: list[str] = []
+            if source in missing and source_ref:
+                refs_to_try.append(source_ref)
+            if dest_refs:
+                for idx, d_id in enumerate(destinations):
+                    if d_id in missing and idx < len(dest_refs) and dest_refs[idx]:
+                        refs_to_try.append(dest_refs[idx])
+
+            for ref in refs_to_try:
+                try:
+                    t, v = _parse_link(ref)
+                    if t == "invite":
+                        await client.join_chat(f"https://t.me/+{v}")
+                    elif t == "username":
+                        await client.get_chat(f"@{v}")
+                except Exception:
+                    pass  # Even partial resolution helps
 
         for msg_id in range(start_id, end_id + 1):
             if stop_event and stop_event.is_set():
