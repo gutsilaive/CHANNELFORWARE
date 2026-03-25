@@ -47,22 +47,29 @@ def _make_client(
 
 # ─────────────────────────────  URL / ID parsing  ────────────────────────────
 
-def _parse_link(text: str) -> str:
+def _parse_link(text: str) -> tuple[str, str | int]:
     """
-    Extract the meaningful part from any Telegram channel reference.
-    Returns: '+hash', '@username', '-100xxxxxxxx' (as string), or plain 'username'.
+    Categorize and extract the target from any input string.
+    Returns: (type, target) where type is "invite", "id", or "username".
     """
     text = text.strip()
-    # Full URL
-    m = re.match(r"https?://t\.me/(?:joinchat/)?([\w+/=@-]+)", text)
-    if m:
-        return m.group(1)
-    # t.me/... without scheme
-    m = re.match(r"t\.me/(?:joinchat/)?([\w+/=@-]+)", text)
-    if m:
-        return m.group(1)
-    # Already bare: @username, +hash, -100xxx, or plain username
-    return text
+
+    # 1. Numeric ID
+    if re.match(r"^-?\d+$", text):
+        return ("id", int(text))
+
+    # 2. Invite links (joinchat/Hash or +Hash)
+    m_invite = re.search(r"(?:joinchat/|\+)([\w-]+)", text)
+    if m_invite:
+        return ("invite", m_invite.group(1))
+
+    # 3. Public t.me/username links
+    m_user = re.search(r"t\.me/([\w_]+)", text)
+    if m_user:
+        return ("username", m_user.group(1))
+
+    # 4. Fallback: treat as raw username (with or without @)
+    return ("username", text.lstrip("@"))
 
 
 # ─────────────────────────────  Channel helpers  ─────────────────────────────
@@ -86,18 +93,19 @@ async def get_joined_channels(session_string: str) -> list[dict]:
 async def resolve_and_join_channel(session_string: str, link_or_username: str) -> dict:
     """
     Resolve any channel/group reference to {id, title, username}.
-    Supports: @username, t.me/username, t.me/+hash, https://t.me/+hash, -100xxx, plain numeric.
+    Supports: @username, t.me/username, t.me/+hash, https://t.me/joinchat/hash, -100xxx.
     Auto-joins if not already a member.
     Raises ValueError with a user-friendly message on failure.
     """
     async with _make_client(session_string=session_string) as client:
-        target = _parse_link(link_or_username)
+        target_type, target_val = _parse_link(link_or_username)
 
-        # ── Private invite hash (+abc123) ─────────────────────────────────────
-        if target.startswith("+"):
-            invite_hash = target.lstrip("+")
+        # ── Private invite hash ───────────────────────────────────────────────
+        if target_type == "invite":
+            invite_hash = target_val
+            full_invite_link = f"https://t.me/+{invite_hash}"
             try:
-                chat = await client.join_chat(target)
+                chat = await client.join_chat(full_invite_link)
                 return _chat_dict(chat)
             except UserAlreadyParticipant:
                 pass
@@ -136,8 +144,8 @@ async def resolve_and_join_channel(session_string: str, link_or_username: str) -
             )
 
         # ── Numeric ID ────────────────────────────────────────────────────────
-        if re.match(r"^-?\d+$", target):
-            chat_id = int(target)
+        elif target_type == "id":
+            chat_id = int(target_val)
             if 0 < chat_id < 1_000_000_000_000:
                 chat_id = int(f"-100{chat_id}")
             try:
@@ -147,16 +155,17 @@ async def resolve_and_join_channel(session_string: str, link_or_username: str) -
                 raise ValueError(f"❌ Could not fetch channel by ID `{chat_id}`: {e}")
 
         # ── @username or plain username ────────────────────────────────────────
-        username_clean = target.lstrip("@")
-        try:
-            chat = await client.get_chat(f"@{username_clean}")
-        except ChannelPrivate:
-            raise ValueError(
-                "❌ This channel is private.\n"
-                "Provide an invite link: `https://t.me/+hash`"
-            )
-        except Exception as e:
-            raise ValueError(f"❌ Could not find `@{username_clean}`: {e}")
+        elif target_type == "username":
+            username_clean = target_val
+            try:
+                chat = await client.get_chat(f"@{username_clean}")
+            except ChannelPrivate:
+                raise ValueError(
+                    "❌ This channel is private.\n"
+                    "Provide an invite link: `https://t.me/+hash`"
+                )
+            except Exception as e:
+                raise ValueError(f"❌ Could not find `@{username_clean}`: {e}")
 
         # Try to join (silently ignore if already a member or if we're an admin)
         try:
