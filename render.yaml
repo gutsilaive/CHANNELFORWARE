@@ -1,10 +1,10 @@
 services:
-  - type: web             # Web service so Render assigns a public URL to ping
+  - type: web
     name: autoforward-bot
     pythonVersion: "3.11.0"
     runtime: python
     plan: free
-    numInstances: 1       # Exactly 1 instance — no duplicate bots
+    numInstances: 1
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
@@ -16,5 +16,4 @@ services:
         sync: false
       - key: SUPABASE_KEY
         sync: false
-      - key: PORT
-        value: "8080"
+      # PORT is injected automatically by Render — do NOT override it here

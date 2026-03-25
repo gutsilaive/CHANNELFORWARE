@@ -12,7 +12,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Start keepalive absolutely first, before ANY other imports that might crash (like config)
-from keepalive import start_keepalive, start_ping_task
+from keepalive import start_keepalive, start_ping_task, cancel_ping_task
 start_keepalive()
 
 try:
@@ -33,12 +33,16 @@ try:
     import handlers.tasks as tasks_h
 
     async def post_init(application):
-        """Set bot commands menu and start keep-alive pinger."""
+        """Set bot commands and start keep-alive pinger."""
         await application.bot.set_my_commands([
             BotCommand("start", "Open main menu"),
         ])
         logger.info("✅ Bot commands set.")
         start_ping_task()  # schedules self-ping on the live event loop
+
+    async def post_shutdown(application):
+        """Clean up background tasks on graceful shutdown."""
+        cancel_ping_task()
 
     async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Log all errors so they appear in Render logs for debugging."""
@@ -50,7 +54,8 @@ try:
             ApplicationBuilder()
             .token(config.BOT_TOKEN)
             .post_init(post_init)
-            .concurrent_updates(True)   # allow parallel message handling
+            .post_shutdown(post_shutdown)
+            .concurrent_updates(True)
             .build()
         )
 
