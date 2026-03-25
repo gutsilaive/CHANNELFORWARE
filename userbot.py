@@ -117,8 +117,14 @@ async def resolve_and_join_channel(session_string: str, link_or_username: str) -
             except InviteHashInvalid:
                 raise ValueError("❌ This invite link is invalid.")
             except FloodWait as e:
+                if e.value > 30:
+                    raise ValueError(f"❌ Telegram rate limit is too high ({e.value}s). Please try again later.")
                 await asyncio.sleep(e.value + 1)
-                raise ValueError("❌ Telegram rate limit. Please try again in a moment.")
+                try:
+                    chat = await client.join_chat(full_invite_link)
+                    return _chat_dict(chat)
+                except Exception as e2:
+                    raise ValueError(f"❌ Telegram rate limit retry failed: {e2}")
             except Exception as e:
                 raise ValueError(f"❌ Could not join channel: {e}")
 
@@ -154,6 +160,15 @@ async def resolve_and_join_channel(session_string: str, link_or_username: str) -
             try:
                 chat = await client.get_chat(chat_id)
                 return _chat_dict(chat)
+            except FloodWait as e:
+                if e.value > 30:
+                    raise ValueError(f"❌ Telegram rate limit is too high ({e.value}s). Please try again later.")
+                await asyncio.sleep(e.value + 1)
+                try:
+                    chat = await client.get_chat(chat_id)
+                    return _chat_dict(chat)
+                except Exception as e2:
+                    raise ValueError(f"❌ Telegram rate limit retry failed: {e2}")
             except Exception as e:
                 raise ValueError(f"❌ Could not fetch channel by ID `{chat_id}`: {e}")
 
@@ -167,16 +182,31 @@ async def resolve_and_join_channel(session_string: str, link_or_username: str) -
                     "❌ This channel is private.\n"
                     "Provide an invite link: `https://t.me/+hash`"
                 )
+            except FloodWait as e:
+                if e.value > 30:
+                    raise ValueError(f"❌ Telegram rate limit is too high ({e.value}s). Please try again later.")
+                await asyncio.sleep(e.value + 1)
+                try:
+                    chat = await client.get_chat(f"@{username_clean}")
+                except Exception as e2:
+                    raise ValueError(f"❌ Telegram rate limit retry failed: {e2}")
             except Exception as e:
                 raise ValueError(f"❌ Could not find `@{username_clean}`: {e}")
 
-        # Try to join (silently ignore if already a member or if we're an admin)
-        try:
-            await client.join_chat(f"@{username_clean}")
-        except (UserAlreadyParticipant, Exception):
-            pass
+            # Try to join (silently ignore if already a member or if we're an admin)
+            try:
+                await client.join_chat(f"@{username_clean}")
+            except FloodWait as e:
+                if e.value <= 30:
+                    await asyncio.sleep(e.value + 1)
+                    try:
+                        await client.join_chat(f"@{username_clean}")
+                    except Exception:
+                        pass
+            except (UserAlreadyParticipant, Exception):
+                pass
 
-        return _chat_dict(chat)
+            return _chat_dict(chat)
 
 
 def _chat_dict(chat) -> dict:
