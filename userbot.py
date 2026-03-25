@@ -239,7 +239,7 @@ async def forward_messages(
         needed_ids: set = {source} | {d for d in destinations}
         found_ids: set = set()
         try:
-            async for dialog in client.get_dialogs(limit=500):
+            async for dialog in client.get_dialogs(limit=1000):  # scan top 1000 dialogs
                 if dialog.chat.id in needed_ids:
                     found_ids.add(dialog.chat.id)
                 if found_ids >= needed_ids:
@@ -262,11 +262,21 @@ async def forward_messages(
                 try:
                     t, v = _parse_link(ref)
                     if t == "invite":
-                        await client.join_chat(f"https://t.me/+{v}")
+                        try:
+                            await client.join_chat(f"https://t.me/+{v}")
+                        except UserAlreadyParticipant:
+                            # Already a member — use CheckChatInvite to populate peer cache
+                            try:
+                                await client.invoke(CheckChatInvite(hash=v))
+                            except Exception:
+                                pass
                     elif t == "username":
-                        await client.get_chat(f"@{v}")
+                        try:
+                            await client.get_chat(f"@{v}")
+                        except Exception:
+                            pass
                 except Exception:
-                    pass  # Even partial resolution helps
+                    pass
 
         for msg_id in range(start_id, end_id + 1):
             if stop_event and stop_event.is_set():
@@ -319,7 +329,9 @@ async def forward_messages(
                 effective_caption = msg.caption or None
                 override_caption = False
 
-            parse_mode = "markdown" if effective_caption else None
+            # Captions are always sent as plain text (no parse_mode).
+            # This prevents BadRequest errors from special Markdown characters.
+            parse_mode = None
 
             # ── Send to all destinations ──────────────────────────────────────
             sent_ok = 0
@@ -405,7 +417,7 @@ async def forward_messages(
             await asyncio.sleep(0.5)
 
     result = {"forwarded": forwarded, "errors": errors, "skipped": skipped}
-    if last_error and forwarded == 0:
-        result["last_error"] = last_error
+    if last_error:
+        result["last_error"] = last_error  # always report last error
     return result
 
