@@ -24,6 +24,7 @@ try:
 
     from telegram import BotCommand
     from telegram.ext import ApplicationBuilder, ContextTypes
+    from telegram.error import Conflict
 
     import config
     import handlers.start as start_h
@@ -46,6 +47,12 @@ try:
 
     async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Log all errors so they appear in Render logs for debugging."""
+        if isinstance(context.error, Conflict):
+            # Normal during Render's 15-second zero-downtime deploy window.
+            # Two pods are active simultaneously while the old one drains.
+            logger.warning("⚠️ 409 Conflict ignored (normal during zero-downtime deploy handover).")
+            return
+
         if context.error:
             logger.error(f"Telegram API Exception: {context.error}", exc_info=context.error)
 
