@@ -41,15 +41,9 @@ try:
         start_ping_task()  # schedules self-ping on the live event loop
 
     async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Suppress specific noisy errors from filling the logs."""
+        """Log all errors so they appear in Render logs for debugging."""
         if context.error:
-            err_str = str(context.error)
-            if "Conflict: terminated by other getUpdates request" in err_str:
-                # Silence deployment overlap noise
-                return
-            if "Message is not modified" in err_str:
-                return
-            logger.error(f"Telegram API Exception: {context.error}")
+            logger.error(f"Telegram API Exception: {context.error}", exc_info=context.error)
 
     def main():
         app = (

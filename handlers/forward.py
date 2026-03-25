@@ -1,17 +1,18 @@
 """
 handlers/forward.py
-Full forward conversation flow:
-  Step 1: Pick source channel (from list or type link)
-  Step 2: Add destination channels
-  Step 3: Set message range (count or start/end)
-  Step 4: Optional custom caption
-  Step 5: Optional thumbnail photo
+New forward flow (6 steps):
+  Step 1: Source channel  (any link / @username / invite / ID)
+  Step 2: Message link(s) (single link  or  start link + end link)
+  Step 3: Custom Caption  (optional, only applied to media)
+  Step 4: Custom Thumbnail (optional, only applied to video/doc)
+  Step 5: Destination channel(s) (add one or more)
   Step 6: Confirm → live progress
 """
 from __future__ import annotations
 import asyncio
 import math
 import os
+import re
 import tempfile
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -22,59 +23,19 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 from database import get_session, create_task, update_task_progress, finish_task
-from userbot import get_joined_channels, resolve_and_join_channel, forward_messages, get_latest_message_id
+from userbot import resolve_and_join_channel, forward_messages
 from handlers.ui import E, back_kb, progress_bar, pct
 from handlers.start import _require_admin
 import config
 
-# ── States ────────────────────────────────────────────────────────────────────
-SRC, DST, RANGE, CAPTION, THUMB = range(5)
+# ── Conversation states ───────────────────────────────────────────────────────
+SRC, MSG, CAPTION, THUMB, DST = range(5)
 
-# ── Per-user stop events ──────────────────────────────────────────────────────
+# ── Per-user stop events for running jobs ─────────────────────────────────────
 _stop_events: dict[str, asyncio.Event] = {}
 
-PAGE = 8
 
-
-# ─────────────────────────  Keyboards  ───────────────────────────────────────
-
-def _src_kb(channels: list[dict], page: int) -> InlineKeyboardMarkup:
-    total = max(1, math.ceil(len(channels) / PAGE))
-    rows = []
-    for ch in channels[page * PAGE: page * PAGE + PAGE]:
-        # callback_data must be < 64 bytes — only store the ID
-        rows.append([InlineKeyboardButton(
-            f"📢 {ch['title'][:30]}",
-            callback_data=f"fw_src:{ch['id']}"
-        )])
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton("◀️ Prev", callback_data=f"fw_srcpg:{page-1}"))
-    if page < total - 1:
-        nav.append(InlineKeyboardButton("Next ▶️", callback_data=f"fw_srcpg:{page+1}"))
-    if nav:
-        rows.append(nav)
-    rows.append([InlineKeyboardButton("✏️ Type link/username", callback_data="fw_src_manual")])
-    rows.append([InlineKeyboardButton(f"{E['stop']} Cancel", callback_data="fw_cancel")])
-    return InlineKeyboardMarkup(rows)
-
-
-def _dst_kb(dests: list[dict]) -> InlineKeyboardMarkup:
-    rows = []
-    for d in dests:
-        rows.append([InlineKeyboardButton(
-            f"✅ {d['title'][:30]} (tap to remove)",
-            callback_data=f"fw_dst_rm:{d['id']}"
-        )])
-    rows.append([InlineKeyboardButton("➕ Add Channel/Group", callback_data="fw_dst_add")])
-    if dests:
-        rows.append([InlineKeyboardButton(
-            f"✔️ Done ({len(dests)} selected)",
-            callback_data="fw_dst_done"
-        )])
-    rows.append([InlineKeyboardButton(f"{E['stop']} Cancel", callback_data="fw_cancel")])
-    return InlineKeyboardMarkup(rows)
-
+# ─────────────────────────  Helpers  ─────────────────────────────────────────
 
 def _cancel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -89,11 +50,52 @@ def _skip_cancel_kb(skip_cb: str) -> InlineKeyboardMarkup:
     ])
 
 
+def _parse_msg_link(text: str) -> tuple[int | None, int | None]:
+    """
+    Parse a Telegram message link → (channel_id_or_None, msg_id_or_None).
+    Handles:
+      • https://t.me/c/CHANNEL_ID/MSG_ID   (private)
+      • https://t.me/username/MSG_ID       (public)
+      • plain number                        (treat as msg_id)
+    """
+    text = text.strip()
+    # Private: t.me/c/CHANNEL_ID/MSG_ID
+    m = re.search(r't\.me/c/(\d+)/(\d+)', text)
+    if m:
+        return int(f"-100{m.group(1)}"), int(m.group(2))
+    # Public: t.me/username/MSG_ID
+    m = re.search(r't\.me/[\w_-]+/(\d+)', text)
+    if m:
+        return None, int(m.group(1))
+    # Bare number
+    if text.isdigit():
+        return None, int(text)
+    return None, None
+
+
+def _dst_kb(dests: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for d in dests:
+        rows.append([InlineKeyboardButton(
+            f"✅ {d['title'][:28]} (tap to remove)",
+            callback_data=f"fw_dst_rm:{d['id']}"
+        )])
+    rows.append([InlineKeyboardButton("➕ Add Another Channel/Group", callback_data="fw_dst_add")])
+    if dests:
+        rows.append([InlineKeyboardButton(
+            f"✔️ Done ({len(dests)} selected)", callback_data="fw_dst_done"
+        )])
+    rows.append([InlineKeyboardButton(f"{E['stop']} Cancel", callback_data="fw_cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
 # ─────────────────────────  Step 1: Source  ──────────────────────────────────
 
 async def fw_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Entry point — ask for source channel link."""
     if not await _require_admin(update, ctx):
         return ConversationHandler.END
+
     uid = update.effective_user.id
     session = get_session(uid)
     if not session:
@@ -106,142 +108,212 @@ async def fw_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.callback_query.answer()
 
-    # Use shared channel cache
-    from handlers.channels import _get_cached, _set_cache
-    channels = _get_cached(ctx, uid)
-    if not channels:
-        msg = await update.callback_query.edit_message_text(
-            f"{E['refresh']} Loading channels… (first time ~15s)"
-        )
-        try:
-            channels = await get_joined_channels(session)
-            _set_cache(ctx, uid, channels)
-        except Exception as e:
-            await msg.edit_text(
-                f"{E['error']} Could not load channels:\n`{e}`",
-                parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb("home"),
-            )
-            return ConversationHandler.END
-
     # Init state
     ctx.user_data["fw"] = {
         "source_id": None, "source_title": None,
-        "destinations": [],
         "start_id": None, "end_id": None,
+        "msg_link_raw": None,
+        "destinations": [],
         "caption": None, "thumbnail_path": None,
     }
-    ctx.user_data["fw_channels"] = channels
 
-    text = (
-        f"{E['forward']} *Forward — Step 1/5  · Pick Source*\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Select which channel to forward *from*:"
-    )
-    try:
-        await (msg if channels and not _get_cached(ctx, uid) else update.callback_query).edit_message_text(
-            text, parse_mode=ParseMode.MARKDOWN, reply_markup=_src_kb(channels, 0)
-        )
-    except Exception:
-        await update.callback_query.edit_message_text(
-            text, parse_mode=ParseMode.MARKDOWN, reply_markup=_src_kb(channels, 0)
-        )
-    return SRC
-
-
-async def fw_srcpg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    page = int(update.callback_query.data.split(":")[1])
-    channels = ctx.user_data.get("fw_channels", [])
-    try:
-        await update.callback_query.edit_message_reply_markup(
-            reply_markup=_src_kb(channels, page)
-        )
-    except Exception:
-        pass
-    return SRC
-
-
-async def fw_src_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Tapped a channel button as source — look up title from cache."""
-    await update.callback_query.answer()
-    parts = update.callback_query.data.split(":")
-    ch_id = int(parts[1])
-    # Look up title from cached channels
-    channels = ctx.user_data.get("fw_channels", [])
-    ch = next((c for c in channels if c["id"] == ch_id), None)
-    ctx.user_data["fw"]["source_id"] = ch_id
-    ctx.user_data["fw"]["source_title"] = ch["title"] if ch else str(ch_id)
-    await _show_dst(update.callback_query.message, ctx)
-    return DST
-
-
-async def fw_src_manual(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Type source channel manually."""
-    await update.callback_query.answer()
     await update.callback_query.edit_message_text(
-        f"{E['forward']} *Forward — Step 1/5  · Source*\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Send the source channel link or username:\n\n"
+        f"{E['forward']} *Forward — Step 1/6  ·  Source Channel*\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Send the **source channel** link or username:\n\n"
         "• `@username`\n"
         "• `https://t.me/username`\n"
-        "• `https://t.me/+invitehash`\n"
-        "• `-100xxxxxxxxxx`",
+        "• `https://t.me/+invitehash`  ← private\n"
+        "• `-100xxxxxxxxxx`  ← numeric ID\n\n"
+        "_The bot will join automatically if needed._",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=_cancel_kb(),
     )
-    ctx.user_data["_fw_mode"] = "src"
     return SRC
 
 
 async def fw_src_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Text received in SRC or DST state."""
+    """Received source link text."""
     uid = update.effective_user.id
     text = update.message.text.strip()
     session = get_session(uid)
-    mode = ctx.user_data.get("_fw_mode", "dst")
 
     if not session:
         await update.message.reply_text(f"{E['error']} Session expired. Use /start.")
         return ConversationHandler.END
 
-    wait = await update.message.reply_text(f"{E['refresh']} Resolving…")
+    wait = await update.message.reply_text(f"{E['refresh']} Resolving source channel…")
     try:
         info = await resolve_and_join_channel(session, text)
     except ValueError as e:
-        await wait.edit_text(f"{str(e)}\n\n_Try again or tap Cancel._", parse_mode=ParseMode.MARKDOWN)
-        return SRC if mode == "src" else DST
+        await wait.edit_text(
+            f"{str(e)}\n\n_Try again or tap Cancel._",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_cancel_kb(),
+        )
+        return SRC
     except Exception as e:
-        await wait.edit_text(f"{E['error']} `{e}`", parse_mode=ParseMode.MARKDOWN)
-        return SRC if mode == "src" else DST
+        await wait.edit_text(
+            f"{E['error']} `{e}`\n\n_Try again._",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_cancel_kb(),
+        )
+        return SRC
 
-    if mode == "src":
-        ctx.user_data["fw"]["source_id"] = info["id"]
-        ctx.user_data["fw"]["source_title"] = info["title"]
-        ctx.user_data.pop("_fw_mode", None)
-        await wait.delete()
-        await _show_dst(update.message, ctx, new=True)
-        return DST
-    else:  # dst
-        dests = ctx.user_data["fw"]["destinations"]
-        if not any(d["id"] == info["id"] for d in dests):
-            dests.append(info)
-        ctx.user_data.pop("_fw_mode", None)
-        await wait.delete()
-        await _show_dst(update.message, ctx, new=True)
-        return DST
+    ctx.user_data["fw"]["source_id"] = info["id"]
+    ctx.user_data["fw"]["source_title"] = info["title"]
+    await wait.delete()
+
+    await update.message.reply_text(
+        f"{E['forward']} *Forward — Step 2/6  ·  Message Link(s)*\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        f"✅ Source: `{info['title']}`\n\n"
+        "📎 *Paste the message link(s) to forward:*\n\n"
+        "*Single message:*\n"
+        "`https://t.me/c/1234567890/100`\n\n"
+        "*Range (start to end — send both on one line):*\n"
+        "`https://t.me/c/1234567890/100  https://t.me/c/1234567890/200`\n\n"
+        "_Right-click any message → Copy Message Link_",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=_cancel_kb(),
+    )
+    return MSG
 
 
-# ─────────────────────────  Step 2: Destinations  ────────────────────────────
+# ─────────────────────────  Step 2: Message Link(s)  ─────────────────────────
 
-async def _show_dst(message, ctx, new=False):
+async def fw_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Parse message link(s) to determine the forward range."""
+    text = update.message.text.strip()
+    fw = ctx.user_data["fw"]
+
+    # Split on whitespace to find up to 2 links/numbers
+    parts = text.split()
+
+    id1 = id2 = None
+
+    # Try to parse first link
+    _, id1 = _parse_msg_link(parts[0]) if parts else (None, None)
+    if len(parts) >= 2:
+        _, id2 = _parse_msg_link(parts[1])
+
+    if not id1:
+        await update.message.reply_text(
+            f"{E['warn']} Couldn't read that message link.\n\n"
+            "Please send a valid Telegram message link like:\n"
+            "`https://t.me/c/1234567890/123`\n\n"
+            "_Right-click any message in Telegram → Copy Message Link_",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_cancel_kb(),
+        )
+        return MSG
+
+    start_id = min(id1, id2) if id2 else id1
+    end_id = max(id1, id2) if id2 else id1
+
+    # Enforce max cap
+    cap = config.MAX_FORWARD
+    if end_id - start_id + 1 > cap:
+        start_id = end_id - cap + 1
+        await update.message.reply_text(
+            f"{E['warn']} Range capped to `{cap}` messages. Start adjusted to `{start_id}`.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    fw["start_id"] = start_id
+    fw["end_id"] = end_id
+    fw["msg_link_raw"] = text
+
+    total = end_id - start_id + 1
+
+    # Proceed to caption step
+    await update.message.reply_text(
+        f"{E['forward']} *Forward — Step 3/6  ·  Caption*\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Source: `{fw['source_title']}`\n"
+        f"Messages: `{start_id}` → `{end_id}` (*{total}* msg{'s' if total > 1 else ''})\n\n"
+        "✏️ *Custom caption for videos / photos / documents?*\n"
+        "Send new caption text, or **Skip** to keep originals.\n\n"
+        "_Text-only messages are always forwarded unchanged._",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=_skip_cancel_kb("fw_skip_cap"),
+    )
+    return CAPTION
+
+
+# ─────────────────────────  Step 3: Caption  ─────────────────────────────────
+
+async def fw_caption(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["fw"]["caption"] = update.message.text.strip()
+    await _ask_thumb(update.message, ctx, new=True)
+    return THUMB
+
+
+async def fw_skip_cap(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    ctx.user_data["fw"]["caption"] = None
+    await _ask_thumb(update.callback_query.message, ctx)
+    return THUMB
+
+
+# ─────────────────────────  Step 4: Thumbnail  ───────────────────────────────
+
+async def _ask_thumb(message, ctx, new=False):
+    fw = ctx.user_data["fw"]
+    cap_str = f"`{fw['caption'][:60]}`" if fw.get("caption") else "_keep original_"
+    text = (
+        f"{E['forward']} *Forward — Step 4/6  ·  Thumbnail*\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Caption: {cap_str}\n\n"
+        "🖼️ Send a **photo** to replace thumbnails on videos & documents,\n"
+        "or **Skip** to keep originals."
+    )
+    kb = _skip_cancel_kb("fw_skip_thumb")
+    try:
+        if new:
+            await message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        else:
+            await message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    except Exception:
+        await message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+
+async def fw_thumb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """User sent a photo for thumbnail."""
+    photo = update.message.photo[-1]
+    wait = await update.message.reply_text("🔄 Saving thumbnail…")
+    try:
+        f = await photo.get_file()
+        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        tmp.close()
+        await f.download_to_drive(tmp.name)
+        ctx.user_data["fw"]["thumbnail_path"] = tmp.name
+    except Exception:
+        ctx.user_data["fw"]["thumbnail_path"] = None
+    await wait.delete()
+    await _ask_dst(update.message, ctx, new=True)
+    return DST
+
+
+async def fw_skip_thumb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    ctx.user_data["fw"]["thumbnail_path"] = None
+    await _ask_dst(update.callback_query.message, ctx)
+    return DST
+
+
+# ─────────────────────────  Step 5: Destination(s)  ─────────────────────────
+
+async def _ask_dst(message, ctx, new=False):
     fw = ctx.user_data["fw"]
     dests = fw["destinations"]
-    dests_str = ("*Added:*  " + ", ".join(f"`{d['title'][:20]}`" for d in dests)) if dests else "_None added yet_"
+    dests_str = ("*Added:*  " + ", ".join(f"`{d['title'][:20]}`" for d in dests)) if dests else "_None yet_"
     text = (
-        f"{E['forward']} *Forward — Step 2/5  · Destinations*\n"
+        f"{E['forward']} *Forward — Step 5/6  ·  Destination*\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"Source: `{fw['source_title']}`\n\n"
-        f"Add the channel(s)/group(s) to forward *to*.\n"
+        "📥 Where to forward *to*?\n"
+        "Tap **➕ Add Channel/Group** and send the link.\n\n"
         f"{dests_str}"
     )
     kb = _dst_kb(dests)
@@ -257,18 +329,53 @@ async def _show_dst(message, ctx, new=False):
 async def fw_dst_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.edit_message_text(
-        f"{E['forward']} *Forward — Step 2/5  · Add Destination*\n"
+        f"{E['forward']} *Forward — Step 5/6  ·  Add Destination*\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "Send the destination channel/group link:\n\n"
         "• `@username`\n"
         "• `https://t.me/username`\n"
         "• `https://t.me/+invitehash`\n"
-        "• `-100xxxxxxxxxx`\n\n"
-        "_The user account will auto-join if not already a member._",
+        "• `-100xxxxxxxxxx`",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=_cancel_kb(),
     )
-    ctx.user_data["_fw_mode"] = "dst"
+    return DST
+
+
+async def fw_dst_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Received destination link text."""
+    uid = update.effective_user.id
+    text = update.message.text.strip()
+    session = get_session(uid)
+
+    if not session:
+        await update.message.reply_text(f"{E['error']} Session expired. Use /start.")
+        return ConversationHandler.END
+
+    wait = await update.message.reply_text(f"{E['refresh']} Resolving destination…")
+    try:
+        info = await resolve_and_join_channel(session, text)
+    except ValueError as e:
+        await wait.edit_text(
+            f"{str(e)}\n\n_Try again or tap Cancel._",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_cancel_kb(),
+        )
+        return DST
+    except Exception as e:
+        await wait.edit_text(
+            f"{E['error']} `{e}`\n\n_Try again._",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_cancel_kb(),
+        )
+        return DST
+
+    dests = ctx.user_data["fw"]["destinations"]
+    if not any(d["id"] == info["id"] for d in dests):
+        dests.append(info)
+
+    await wait.delete()
+    await _ask_dst(update.message, ctx, new=True)
     return DST
 
 
@@ -277,7 +384,7 @@ async def fw_dst_rm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ch_id = int(update.callback_query.data.split(":")[1])
     dests = ctx.user_data["fw"]["destinations"]
     ctx.user_data["fw"]["destinations"] = [d for d in dests if d["id"] != ch_id]
-    await _show_dst(update.callback_query.message, ctx)
+    await _ask_dst(update.callback_query.message, ctx)
     return DST
 
 
@@ -287,167 +394,26 @@ async def fw_dst_done(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not fw["destinations"]:
         await update.callback_query.answer("⚠️ Add at least one destination first!", show_alert=True)
         return DST
-    await update.callback_query.edit_message_text(
-        f"{E['forward']} *Forward — Step 3/5  · Message Range*\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Source: `{fw['source_title']}`\n"
-        f"Destinations: *{len(fw['destinations'])}* channel(s)\n\n"
-        "📋 *How many messages to forward?*\n\n"
-        "Send one of:\n"
-        "• `100` — messages 1 to 100\n"
-        "• `50 200` — messages 50 to 200\n"
-        "• `50-200` — same as above\n\n"
-        f"_Max: `{config.MAX_FORWARD}` per job._",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=_cancel_kb(),
-    )
-    return RANGE
-
-
-async def fw_dst_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Text typed during DST state — treat as destination channel input."""
-    ctx.user_data["_fw_mode"] = "dst"
-    return await fw_src_text(update, ctx)
-
-
-# ─────────────────────────  Step 3: Range  ───────────────────────────────────
-
-async def fw_range(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    raw = update.message.text.strip().replace(",", " ").replace("-", " ")
-    parts = [p for p in raw.split() if p.isdigit()]
-
-    uid = update.effective_user.id
-    session = get_session(uid)
-    fw = ctx.user_data["fw"]
-
-    if len(parts) == 1:
-        # User gave a count — resolve to the LAST N actual messages
-        count = int(parts[0])
-        wait = await update.message.reply_text(f"{E['refresh']} Checking latest message ID…")
-        latest = await get_latest_message_id(session, fw["source_id"])
-        await wait.delete()
-        if not latest:
-            await update.message.reply_text(
-                f"{E['error']} Could not fetch latest message. Try using `start end` format (e.g. `1000 1100`).",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return RANGE
-        end_id = latest
-        start_id = max(1, latest - count + 1)
-    elif len(parts) >= 2:
-        start_id, end_id = int(parts[0]), int(parts[1])
-    else:
-        await update.message.reply_text(
-            f"{E['warn']} Send a number like `100` (last 100 msgs) or range like `1000 1100`.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return RANGE
-
-    if start_id > end_id:
-        start_id, end_id = end_id, start_id
-
-    cap = config.MAX_FORWARD
-    if end_id - start_id + 1 > cap:
-        start_id = end_id - cap + 1
-        await update.message.reply_text(
-            f"{E['warn']} Capped to `{cap}` messages. Start adjusted to `{start_id}`.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-
-    ctx.user_data["fw"]["start_id"] = start_id
-    ctx.user_data["fw"]["end_id"] = end_id
-
-    await update.message.reply_text(
-        f"{E['forward']} *Forward — Step 4/5  · Caption*\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Source: `{fw['source_title']}`\n"
-        f"Range: `{start_id}` → `{end_id}` (*{end_id-start_id+1}* messages)\n\n"
-        "✏️ *Custom Caption (for media)*\n"
-        "Send new caption text, or *Skip* to keep originals.\n"
-        "_Text messages are always forwarded unchanged._",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=_skip_cancel_kb("fw_skip_cap"),
-    )
-    return CAPTION
-
-
-# ─────────────────────────  Step 4: Caption  ─────────────────────────────────
-
-async def fw_caption(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["fw"]["caption"] = update.message.text.strip()
-    await _ask_thumb(update.message, ctx, new=True)
-    return THUMB
-
-
-async def fw_skip_cap(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    ctx.user_data["fw"]["caption"] = None
-    await _ask_thumb(update.callback_query.message, ctx)
-    return THUMB
-
-
-# ─────────────────────────  Step 5: Thumbnail  ───────────────────────────────
-
-async def _ask_thumb(message, ctx, new=False):
-    fw = ctx.user_data["fw"]
-    cap_str = f"`{fw['caption'][:50]}`" if fw.get("caption") else "_keep original_"
-    text = (
-        f"{E['forward']} *Forward — Step 5/5  · Thumbnail*\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Caption: {cap_str}\n\n"
-        "🖼️ Send a **photo** to replace video thumbnails,\n"
-        "or *Skip* to keep original thumbnails."
-    )
-    kb = _skip_cancel_kb("fw_skip_thumb")
-    try:
-        if new:
-            await message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
-        else:
-            await message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
-    except Exception:
-        await message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
-
-
-async def fw_thumb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """User sent a photo as thumbnail."""
-    photo = update.message.photo[-1]
-    wait = await update.message.reply_text("🔄 Saving thumbnail…")
-    try:
-        f = await photo.get_file()
-        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-        tmp.close()
-        await f.download_to_drive(tmp.name)
-        ctx.user_data["fw"]["thumbnail_path"] = tmp.name
-    except Exception:
-        ctx.user_data["fw"]["thumbnail_path"] = None
-    await wait.delete()
-    await _show_confirm(update.message, ctx, new=True)
-    return ConversationHandler.END
-
-
-async def fw_skip_thumb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    ctx.user_data["fw"]["thumbnail_path"] = None
     await _show_confirm(update.callback_query.message, ctx)
     return ConversationHandler.END
 
 
-# ─────────────────────────  Confirm screen  ──────────────────────────────────
+# ─────────────────────────  Step 6: Confirm  ─────────────────────────────────
 
 async def _show_confirm(message, ctx, new=False):
     fw = ctx.user_data["fw"]
     dst_text = "\n".join(f"  • `{d['title'][:40]}`" for d in fw["destinations"])
     cap_str  = f"`{fw['caption'][:60]}`" if fw.get("caption") else "_keep original_"
-    thm_str  = "✅ Custom photo set" if fw.get("thumbnail_path") else "_keep original_"
+    thm_str  = "✅ Custom photo" if fw.get("thumbnail_path") else "_keep original_"
     total    = fw["end_id"] - fw["start_id"] + 1
     text = (
         f"{E['forward']} *Confirm Forward Job*\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"📤 *Source:* `{fw['source_title']}`\n"
-        f"📥 *Destinations:*\n{dst_text}\n"
-        f"📋 *Range:* `{fw['start_id']}` → `{fw['end_id']}` (*{total}* msgs)\n"
+        f"📋 *Messages:* `{fw['start_id']}` → `{fw['end_id']}` (*{total}* msgs)\n"
         f"✏️ *Caption:* {cap_str}\n"
         f"🖼️ *Thumbnail:* {thm_str}\n"
+        f"📥 *Destinations:*\n{dst_text}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         "Tap **✅ Confirm** to start forwarding!"
     )
@@ -472,6 +438,7 @@ async def fw_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     session = get_session(uid)
     fw = ctx.user_data.get("fw")
+
     if not fw or not session:
         await update.callback_query.answer("Session lost. Use /start.", show_alert=True)
         return
@@ -506,7 +473,7 @@ async def fw_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     progress_msg = await update.callback_query.edit_message_text(
-        _prog_text(0, 0, "Starting…"),
+        _prog_text(0, 0, "Warming up…"),
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{E['stop']} Stop", callback_data=f"fw_stop:{task_id}")]
@@ -549,104 +516,111 @@ async def fw_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         tpath = fw.get("thumbnail_path")
         if tpath:
             try:
-                os.remove(tpath)
+                os.unlink(tpath)
             except Exception:
                 pass
 
-        last_err = result.get("last_error", "")
+        fwd = result.get("forwarded", 0)
+        err = result.get("errors", 0)
+        dst = ", ".join(f"`{d['title'][:20]}`" for d in fw["destinations"])
+        status_icon = "⏹" if stopped else ("✅" if err == 0 else "⚠️")
         final = (
-            f"{'⏹' if stopped else '✅'} *Forward {'Stopped' if stopped else 'Complete'}!*\n"
+            f"{status_icon} *Forward {'Stopped' if stopped else 'Complete'}*\n"
             "━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📤 Source: `{fw['source_title']}`\n\n"
-            f"✅ Forwarded: *{result['forwarded']}* / {total}\n"
-            f"⏭️ Skipped: *{result['skipped']}*\n"
-            f"❌ Errors: *{result['errors']}*\n"
-            + (f"\n⚠️ Last error: `{last_err[:120]}`" if last_err else "")
+            f"📤 Source: `{fw['source_title']}`\n"
+            f"📥 To: {dst}\n\n"
+            f"✅ Forwarded: *{fwd}*\n"
+            f"❌ Errors: *{err}*\n"
         )
-        await progress_msg.edit_text(final, parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb("home"))
+        if result.get("last_error"):
+            final += f"\n⚠️ Last error: `{result['last_error'][:80]}`\n"
 
-    except ValueError as e:
-        finish_task(task_id, status="error", error=str(e))
         await progress_msg.edit_text(
-            f"{E['error']} *Error:*\n{e}", parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb("home")
+            final,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔁 Forward Again", callback_data="fw_start")],
+                [InlineKeyboardButton(f"{E['back']} Home", callback_data="home")],
+            ]),
         )
+
     except Exception as e:
         finish_task(task_id, status="error", error=str(e))
+        _stop_events.pop(task_id, None)
         await progress_msg.edit_text(
-            f"{E['error']} Unexpected error:\n`{e}`", parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb("home")
+            f"❌ *Forward Failed*\n\n`{str(e)[:200]}`",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=back_kb("home"),
         )
 
 
-# ─────────────────────────  Stop  ────────────────────────────────────────────
+# ─────────────────────────  Stop handler  ────────────────────────────────────
 
 async def fw_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer("⏹ Stopping…")
     task_id = update.callback_query.data.split(":", 1)[1]
     ev = _stop_events.get(task_id)
     if ev:
         ev.set()
-        await update.callback_query.answer("⏹ Stopping after current message…")
-    else:
-        await update.callback_query.answer("Already finished.")
 
 
 # ─────────────────────────  Cancel  ──────────────────────────────────────────
 
 async def fw_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer("Cancelled")
     ctx.user_data.pop("fw", None)
-    ctx.user_data.pop("fw_channels", None)
     ctx.user_data.pop("_fw_mode", None)
-    if update.callback_query:
-        await update.callback_query.answer("Cancelled")
-        try:
-            await update.callback_query.edit_message_text(
-                f"{E['stop']} Cancelled. Use /start to go back."
-            )
-        except Exception:
-            pass
-    elif update.message:
-        await update.message.reply_text(f"{E['stop']} Cancelled.")
+    await update.callback_query.edit_message_text(
+        f"{E['stop']} Forward cancelled.",
+        reply_markup=back_kb("home"),
+    )
     return ConversationHandler.END
 
 
 # ─────────────────────────  Register  ────────────────────────────────────────
 
 def register(app):
+    text_filter = filters.TEXT & ~filters.COMMAND
+
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(fw_start, pattern="^fw_start$")],
         states={
-                SRC: [
-                CallbackQueryHandler(fw_srcpg,      pattern=r"^fw_srcpg:\d+$"),
-                CallbackQueryHandler(fw_src_pick,   pattern=r"^fw_src:-?\d+$"),
-                CallbackQueryHandler(fw_src_manual, pattern="^fw_src_manual$"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, fw_src_text),
+            SRC: [
+                MessageHandler(text_filter, fw_src_text),
+                CallbackQueryHandler(fw_cancel, pattern="^fw_cancel$"),
             ],
-            DST: [
-                CallbackQueryHandler(fw_dst_add,  pattern="^fw_dst_add$"),
-                CallbackQueryHandler(fw_dst_rm,   pattern=r"^fw_dst_rm:-?\d+$"),
-                CallbackQueryHandler(fw_dst_done, pattern="^fw_dst_done$"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, fw_dst_text),
-            ],
-            RANGE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, fw_range),
+            MSG: [
+                MessageHandler(text_filter, fw_msg),
+                CallbackQueryHandler(fw_cancel, pattern="^fw_cancel$"),
             ],
             CAPTION: [
                 CallbackQueryHandler(fw_skip_cap, pattern="^fw_skip_cap$"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, fw_caption),
+                CallbackQueryHandler(fw_cancel, pattern="^fw_cancel$"),
+                MessageHandler(text_filter, fw_caption),
             ],
             THUMB: [
                 CallbackQueryHandler(fw_skip_thumb, pattern="^fw_skip_thumb$"),
+                CallbackQueryHandler(fw_cancel, pattern="^fw_cancel$"),
                 MessageHandler(filters.PHOTO, fw_thumb),
+                MessageHandler(text_filter, lambda u, c: u.message.reply_text(
+                    "📸 Please send a *photo* as thumbnail, or tap **Skip**.",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=_skip_cancel_kb("fw_skip_thumb"),
+                )),
+            ],
+            DST: [
+                CallbackQueryHandler(fw_dst_add, pattern="^fw_dst_add$"),
+                CallbackQueryHandler(fw_dst_rm, pattern=r"^fw_dst_rm:-?\d+$"),
+                CallbackQueryHandler(fw_dst_done, pattern="^fw_dst_done$"),
+                CallbackQueryHandler(fw_cancel, pattern="^fw_cancel$"),
+                MessageHandler(text_filter, fw_dst_text),
             ],
         },
-        fallbacks=[
-            CallbackQueryHandler(fw_cancel, pattern="^fw_cancel$"),
-            CallbackQueryHandler(fw_cancel, pattern="^cancel$"),
-            CommandHandler("start", fw_cancel),
-        ],
+        fallbacks=[CallbackQueryHandler(fw_cancel, pattern="^fw_cancel$")],
         allow_reentry=True,
-        per_message=False,
     )
     app.add_handler(conv)
-    # These fire AFTER the conversation ends
+
+    # Handlers outside conversation (confirm + stop)
     app.add_handler(CallbackQueryHandler(fw_confirm, pattern="^fw_confirm$"))
-    app.add_handler(CallbackQueryHandler(fw_stop,    pattern=r"^fw_stop:"))
+    app.add_handler(CallbackQueryHandler(fw_stop, pattern=r"^fw_stop:"))
