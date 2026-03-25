@@ -43,7 +43,9 @@ def _make_client(
         api_hash=api_hash or _DEFAULT_API_HASH,
         session_string=session_string,
         in_memory=True,
+        no_updates=True,  # Crucial to prevent hang on connect
     )
+
 
 
 # ─────────────────────────────  URL / ID parsing  ────────────────────────────
