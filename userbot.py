@@ -423,6 +423,7 @@ async def forward_messages(
                             await client.send_message(
                                 chat_id=dest,
                                 text=msg.text or msg.caption,
+                                entities=msg.entities or msg.caption_entities
                             )
                             sent_ok += 1
                         else:
@@ -431,23 +432,25 @@ async def forward_messages(
                             try:
                                 dl_path = await client.download_media(msg, in_memory=False)
                                 if dl_path:
+                                    # Copy original entities if no override
+                                    ents = msg.caption_entities if not override_caption else None
                                     if msg.video:
-                                        await client.send_video(dest, video=dl_path, caption=effective_caption)
+                                        await client.send_video(dest, video=dl_path, caption=effective_caption, caption_entities=ents)
                                     elif msg.document:
-                                        await client.send_document(dest, document=dl_path, caption=effective_caption)
+                                        await client.send_document(dest, document=dl_path, caption=effective_caption, caption_entities=ents)
                                     elif msg.photo:
-                                        await client.send_photo(dest, photo=dl_path, caption=effective_caption)
+                                        await client.send_photo(dest, photo=dl_path, caption=effective_caption, caption_entities=ents)
                                     elif msg.audio:
-                                        await client.send_audio(dest, audio=dl_path, caption=effective_caption)
+                                        await client.send_audio(dest, audio=dl_path, caption=effective_caption, caption_entities=ents)
                                     elif msg.voice:
-                                        await client.send_voice(dest, voice=dl_path, caption=effective_caption)
+                                        await client.send_voice(dest, voice=dl_path, caption=effective_caption, caption_entities=ents)
                                     elif msg.animation:
-                                        await client.send_animation(dest, animation=dl_path, caption=effective_caption)
+                                        await client.send_animation(dest, animation=dl_path, caption=effective_caption, caption_entities=ents)
                                     elif msg.sticker:
                                         await client.send_sticker(dest, sticker=dl_path)
                                     else:
                                         # Generic fallback
-                                        await client.send_document(dest, document=dl_path, caption=effective_caption)
+                                        await client.send_document(dest, document=dl_path, caption=effective_caption, caption_entities=ents)
                                     sent_ok += 1
                                 else:
                                     errors += 1
