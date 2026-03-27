@@ -19,6 +19,7 @@ from pyrogram.errors import (
     ChannelPrivate,
     MessageIdInvalid,
     PeerIdInvalid,
+    ChatForwardsRestricted,
 )
 from pyrogram.types import Chat, Message
 
@@ -414,6 +415,52 @@ async def forward_messages(
                 try:
                     await _send_to(dest)
                     sent_ok += 1
+
+                except ChatForwardsRestricted:
+                    # ── Fallback for restricted channels ─────────────────────
+                    try:
+                        if is_text_only:
+                            await client.send_message(
+                                chat_id=dest,
+                                text=msg.text or msg.caption,
+                            )
+                            sent_ok += 1
+                        else:
+                            # It's media. We must download and send manually.
+                            dl_path = None
+                            try:
+                                dl_path = await client.download_media(msg, in_memory=False)
+                                if dl_path:
+                                    if msg.video:
+                                        await client.send_video(dest, video=dl_path, caption=effective_caption)
+                                    elif msg.document:
+                                        await client.send_document(dest, document=dl_path, caption=effective_caption)
+                                    elif msg.photo:
+                                        await client.send_photo(dest, photo=dl_path, caption=effective_caption)
+                                    elif msg.audio:
+                                        await client.send_audio(dest, audio=dl_path, caption=effective_caption)
+                                    elif msg.voice:
+                                        await client.send_voice(dest, voice=dl_path, caption=effective_caption)
+                                    elif msg.animation:
+                                        await client.send_animation(dest, animation=dl_path, caption=effective_caption)
+                                    elif msg.sticker:
+                                        await client.send_sticker(dest, sticker=dl_path)
+                                    else:
+                                        # Generic fallback
+                                        await client.send_document(dest, document=dl_path, caption=effective_caption)
+                                    sent_ok += 1
+                                else:
+                                    errors += 1
+                                    last_error = "Failed to download restricted media"
+                            finally:
+                                if dl_path:
+                                    try:
+                                        os.remove(dl_path)
+                                    except Exception:
+                                        pass
+                    except Exception as e2:
+                        errors += 1
+                        last_error = f"Restricted fallback failed: {e2}"
 
                 except PeerIdInvalid:
                     # Peer not in cache — scan ALL dialogs to force-resolve it
