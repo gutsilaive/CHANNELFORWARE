@@ -374,37 +374,6 @@ async def forward_messages(
 
                 async def _send_to(dest_id):
                     """Inner helper — raises on error so caller can retry."""
-                    if thumbnail_path and can_have_thumbnail:
-                        # Download original → re-upload with custom thumbnail
-                        dl_path = None
-                        try:
-                            dl_path = await client.download_media(msg, in_memory=False, progress=make_prog("Downloading"))
-                            if dl_path is None:
-                                raise ValueError("download_media returned None")
-                            if has_video:
-                                await client.send_video(
-                                    chat_id=dest_id,
-                                    video=dl_path,
-                                    caption=effective_caption,
-                                    thumb=thumbnail_path,
-                                    progress=make_prog("Uploading video")
-                                )
-                            else:
-                                await client.send_document(
-                                    chat_id=dest_id,
-                                    document=dl_path,
-                                    caption=effective_caption,
-                                    thumb=thumbnail_path,
-                                    progress=make_prog("Uploading document")
-                                )
-                            return  # CRITICAL: Prevent falling through to copy_message
-                        finally:
-                            if dl_path:
-                                try:
-                                    os.remove(dl_path)
-                                except Exception:
-                                    pass
-
                     # Try standard copying first
                     try:
                         if override_caption:
@@ -436,12 +405,20 @@ async def forward_messages(
                             try:
                                 dl_path = await client.download_media(msg, in_memory=False, progress=make_prog("Downloading"))
                                 if dl_path:
+                                    if os.path.getsize(dl_path) == 0:
+                                        raise ValueError("File downloaded is 0 bytes (likely Telegram timeout)")
+
                                     # Copy original entities if no override
                                     ents = msg.caption_entities if not override_caption else None
+
+                                    thumb_kwargs = {}
+                                    if thumbnail_path and can_have_thumbnail and os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
+                                        thumb_kwargs = {"thumb": thumbnail_path}
+
                                     if msg.video:
-                                        await client.send_video(dest_id, video=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
+                                        await client.send_video(dest_id, video=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading video"), **thumb_kwargs)
                                     elif msg.document:
-                                        await client.send_document(dest_id, document=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
+                                        await client.send_document(dest_id, document=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading document"), **thumb_kwargs)
                                     elif msg.photo:
                                         await client.send_photo(dest_id, photo=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
                                     elif msg.audio:
@@ -454,7 +431,7 @@ async def forward_messages(
                                         await client.send_sticker(dest_id, sticker=dl_path, progress=make_prog("Uploading"))
                                     else:
                                         # Generic fallback
-                                        await client.send_document(dest_id, document=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
+                                        await client.send_document(dest_id, document=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"), **thumb_kwargs)
                                 else:
                                     raise ValueError("Failed to download restricted media")
                             finally:
