@@ -15,7 +15,7 @@ import asyncio
 import logging
 import os
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def _run_server():
-    server = HTTPServer(("0.0.0.0", PORT), _Handler)
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), _Handler)
     server.serve_forever()
 
 
