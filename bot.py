@@ -22,8 +22,8 @@ try:
         _loop = asyncio.new_event_loop()
         asyncio.set_event_loop(_loop)
 
-    from telegram import BotCommand
-    from telegram.ext import ApplicationBuilder, ContextTypes
+    from telegram import BotCommand, Update
+    from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
     from telegram.error import Conflict
 
     import config
@@ -56,6 +56,16 @@ try:
         if context.error:
             logger.error(f"Telegram API Exception: {context.error}", exc_info=context.error)
 
+    async def global_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Catch messages sent when conversation state is lost due to restarts."""
+        if update.message and update.message.text and not update.message.text.startswith('/'):
+            await update.message.reply_text(
+                "🤖 *Session Reset*\n\n"
+                "I wasn't expecting a message right now. If you were in the middle of forwarding, the bot just restarted to apply an update or keep awake.\n\n"
+                "Please type /start to continue.",
+                parse_mode="Markdown"
+            )
+
     def main():
         app = (
             ApplicationBuilder()
@@ -75,6 +85,9 @@ try:
         channels_h.register(app)
         forward_h.register(app)
         tasks_h.register(app)
+
+        # Catch-all for lost states across restarts
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, global_fallback))
 
         logger.info(f"🤖 AutoForward Bot v{config.BOT_VERSION} starting…")
         logger.info(f"🔒 Admin ID: {config.ADMIN_ID}")
