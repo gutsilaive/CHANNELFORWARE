@@ -395,37 +395,31 @@ async def forward_messages(
                                 except Exception:
                                     pass
 
-                    elif override_caption:
-                        # Media with custom caption only (no thumbnail)
-                        await client.copy_message(
-                            chat_id=dest_id,
-                            from_chat_id=source,
-                            message_id=msg_id,
-                            caption=effective_caption,
-                        )
-
-                    else:
-                        # Text or media with no overrides — copy exactly as-is
-                        await client.copy_message(
-                            chat_id=dest_id,
-                            from_chat_id=source,
-                            message_id=msg_id,
-                        )
-
-                try:
-                    await _send_to(dest)
-                    sent_ok += 1
-
-                except ChatForwardsRestricted:
-                    # ── Fallback for restricted channels ─────────────────────
+                    # Try standard copying first
                     try:
+                        if override_caption:
+                            # Media with custom caption only (no thumbnail)
+                            await client.copy_message(
+                                chat_id=dest_id,
+                                from_chat_id=source,
+                                message_id=msg_id,
+                                caption=effective_caption,
+                            )
+                        else:
+                            # Text or media with no overrides — copy exactly as-is
+                            await client.copy_message(
+                                chat_id=dest_id,
+                                from_chat_id=source,
+                                message_id=msg_id,
+                            )
+                    except ChatForwardsRestricted:
+                        # ── Fallback for restricted channels ─────────────────────
                         if is_text_only:
                             await client.send_message(
-                                chat_id=dest,
+                                chat_id=dest_id,
                                 text=msg.text or msg.caption,
                                 entities=msg.entities or msg.caption_entities
                             )
-                            sent_ok += 1
                         else:
                             # It's media. We must download and send manually.
                             dl_path = None
@@ -435,35 +429,34 @@ async def forward_messages(
                                     # Copy original entities if no override
                                     ents = msg.caption_entities if not override_caption else None
                                     if msg.video:
-                                        await client.send_video(dest, video=dl_path, caption=effective_caption, caption_entities=ents)
+                                        await client.send_video(dest_id, video=dl_path, caption=effective_caption, caption_entities=ents)
                                     elif msg.document:
-                                        await client.send_document(dest, document=dl_path, caption=effective_caption, caption_entities=ents)
+                                        await client.send_document(dest_id, document=dl_path, caption=effective_caption, caption_entities=ents)
                                     elif msg.photo:
-                                        await client.send_photo(dest, photo=dl_path, caption=effective_caption, caption_entities=ents)
+                                        await client.send_photo(dest_id, photo=dl_path, caption=effective_caption, caption_entities=ents)
                                     elif msg.audio:
-                                        await client.send_audio(dest, audio=dl_path, caption=effective_caption, caption_entities=ents)
+                                        await client.send_audio(dest_id, audio=dl_path, caption=effective_caption, caption_entities=ents)
                                     elif msg.voice:
-                                        await client.send_voice(dest, voice=dl_path, caption=effective_caption, caption_entities=ents)
+                                        await client.send_voice(dest_id, voice=dl_path, caption=effective_caption, caption_entities=ents)
                                     elif msg.animation:
-                                        await client.send_animation(dest, animation=dl_path, caption=effective_caption, caption_entities=ents)
+                                        await client.send_animation(dest_id, animation=dl_path, caption=effective_caption, caption_entities=ents)
                                     elif msg.sticker:
-                                        await client.send_sticker(dest, sticker=dl_path)
+                                        await client.send_sticker(dest_id, sticker=dl_path)
                                     else:
                                         # Generic fallback
-                                        await client.send_document(dest, document=dl_path, caption=effective_caption, caption_entities=ents)
-                                    sent_ok += 1
+                                        await client.send_document(dest_id, document=dl_path, caption=effective_caption, caption_entities=ents)
                                 else:
-                                    errors += 1
-                                    last_error = "Failed to download restricted media"
+                                    raise ValueError("Failed to download restricted media")
                             finally:
                                 if dl_path:
                                     try:
                                         os.remove(dl_path)
                                     except Exception:
                                         pass
-                    except Exception as e2:
-                        errors += 1
-                        last_error = f"Restricted fallback failed: {e2}"
+
+                try:
+                    await _send_to(dest)
+                    sent_ok += 1
 
                 except PeerIdInvalid:
                     # Peer not in cache — scan ALL dialogs to force-resolve it
