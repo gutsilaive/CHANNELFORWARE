@@ -14,6 +14,7 @@ import math
 import os
 import re
 import tempfile
+import time
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -281,7 +282,8 @@ async def _ask_thumb(message, ctx, new=False):
 
 async def fw_thumb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """User sent a photo for thumbnail."""
-    photo = update.message.photo[-1]
+    # Use smallest resolution available [0] to strictly meet Pyrogram's 320x320/200kb limit
+    photo = update.message.photo[0]
     wait = await update.message.reply_text("🔄 Saving thumbnail…")
     try:
         f = await photo.get_file()
@@ -472,7 +474,7 @@ async def fw_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"`{bar}` {pct(done, total)}\n"
             f"✅ Done: *{done}* / {total}\n"
             f"❌ Errors: *{err}*\n"
-            + (f"\n_{status}_" if status else "")
+            + (f"\n⚡ _{status}_\n" if status else "")
         )
 
     progress_msg = await update.callback_query.edit_message_text(
@@ -486,18 +488,25 @@ async def fw_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     stop_ev = asyncio.Event()
     _stop_events[task_id] = stop_ev
 
-    async def on_progress(done, total_, errors):
+    last_update_time = time.time() - 3.0
+
+    async def on_progress(done, total_, errors, status_str=""):
+        nonlocal last_update_time
         update_task_progress(task_id, done)
-        try:
-            await progress_msg.edit_text(
-                _prog_text(done, errors, pct(done, total_)),
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{E['stop']} Stop", callback_data=f"fw_stop:{task_id}")]
-                ]),
-            )
-        except Exception:
-            pass
+        now = time.time()
+        # Time-throttle UI edits to 2 seconds to avoid Telegram FloodWait
+        if now - last_update_time >= 2.0 or done == total_:
+            try:
+                await progress_msg.edit_text(
+                    _prog_text(done, errors, status_str if status_str else pct(done, total_)),
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"{E['stop']} Stop", callback_data=f"fw_stop:{task_id}")]
+                    ]),
+                )
+                last_update_time = now
+            except Exception:
+                pass
 
     try:
         result = await forward_messages(

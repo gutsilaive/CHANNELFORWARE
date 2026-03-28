@@ -235,7 +235,7 @@ async def get_latest_message_id(session_string: str, channel_id: int) -> int | N
     return None
 
 
-ProgressCallback = Callable[[int, int, int], Awaitable[None]]
+ProgressCallback = Callable[[int, int, int, str], Awaitable[None]]
 
 
 async def forward_messages(
@@ -312,6 +312,13 @@ async def forward_messages(
                 except Exception:
                     pass
 
+        def make_prog(action_name):
+            async def _prog(current, total_bytes):
+                if progress_cb and total_bytes:
+                    pct = int(current * 100 / total_bytes)
+                    await progress_cb(forwarded, total, errors, f"{action_name} {pct}%")
+            return _prog
+
         for msg_id in range(start_id, end_id + 1):
             if stop_event and stop_event.is_set():
                 break
@@ -371,7 +378,7 @@ async def forward_messages(
                         # Download original → re-upload with custom thumbnail
                         dl_path = None
                         try:
-                            dl_path = await client.download_media(msg, in_memory=False)
+                            dl_path = await client.download_media(msg, in_memory=False, progress=make_prog("Downloading"))
                             if dl_path is None:
                                 raise ValueError("download_media returned None")
                             if has_video:
@@ -380,6 +387,7 @@ async def forward_messages(
                                     video=dl_path,
                                     caption=effective_caption,
                                     thumb=thumbnail_path,
+                                    progress=make_prog("Uploading video")
                                 )
                             else:
                                 await client.send_document(
@@ -387,7 +395,9 @@ async def forward_messages(
                                     document=dl_path,
                                     caption=effective_caption,
                                     thumb=thumbnail_path,
+                                    progress=make_prog("Uploading document")
                                 )
+                            return  # CRITICAL: Prevent falling through to copy_message
                         finally:
                             if dl_path:
                                 try:
@@ -424,27 +434,27 @@ async def forward_messages(
                             # It's media. We must download and send manually.
                             dl_path = None
                             try:
-                                dl_path = await client.download_media(msg, in_memory=False)
+                                dl_path = await client.download_media(msg, in_memory=False, progress=make_prog("Downloading"))
                                 if dl_path:
                                     # Copy original entities if no override
                                     ents = msg.caption_entities if not override_caption else None
                                     if msg.video:
-                                        await client.send_video(dest_id, video=dl_path, caption=effective_caption, caption_entities=ents)
+                                        await client.send_video(dest_id, video=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
                                     elif msg.document:
-                                        await client.send_document(dest_id, document=dl_path, caption=effective_caption, caption_entities=ents)
+                                        await client.send_document(dest_id, document=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
                                     elif msg.photo:
-                                        await client.send_photo(dest_id, photo=dl_path, caption=effective_caption, caption_entities=ents)
+                                        await client.send_photo(dest_id, photo=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
                                     elif msg.audio:
-                                        await client.send_audio(dest_id, audio=dl_path, caption=effective_caption, caption_entities=ents)
+                                        await client.send_audio(dest_id, audio=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
                                     elif msg.voice:
-                                        await client.send_voice(dest_id, voice=dl_path, caption=effective_caption, caption_entities=ents)
+                                        await client.send_voice(dest_id, voice=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
                                     elif msg.animation:
-                                        await client.send_animation(dest_id, animation=dl_path, caption=effective_caption, caption_entities=ents)
+                                        await client.send_animation(dest_id, animation=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
                                     elif msg.sticker:
-                                        await client.send_sticker(dest_id, sticker=dl_path)
+                                        await client.send_sticker(dest_id, sticker=dl_path, progress=make_prog("Uploading"))
                                     else:
                                         # Generic fallback
-                                        await client.send_document(dest_id, document=dl_path, caption=effective_caption, caption_entities=ents)
+                                        await client.send_document(dest_id, document=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
                                 else:
                                     raise ValueError("Failed to download restricted media")
                             finally:
@@ -494,8 +504,8 @@ async def forward_messages(
             if sent_ok > 0:
                 forwarded += 1
 
-            if progress_cb and (forwarded % max(1, config.PROGRESS_INTERVAL) == 0):
-                await progress_cb(forwarded, total, errors)
+            if progress_cb:
+                await progress_cb(forwarded, total, errors, "Copying…")
 
             await asyncio.sleep(0.5)
 
