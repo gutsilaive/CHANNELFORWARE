@@ -32,6 +32,8 @@ import config
 _DEFAULT_API_ID   = 2
 _DEFAULT_API_HASH = "36722c72256a24c1225de00eb6a1ca74"
 
+DOWNLOAD_TIMEOUT = 600  # 10 minutes max per file download
+
 
 def _make_client(
     api_id: int | None = None,
@@ -267,6 +269,8 @@ async def forward_messages(
 
     # Message types that can carry a caption
     MEDIA_TYPES = ("video", "photo", "audio", "document", "animation", "voice", "video_note", "sticker")
+    # Types that cannot be downloaded (must be resent differently)
+    NON_DOWNLOADABLE = ("poll", "contact", "location", "venue", "dice")
 
     async with _make_client(session_string=session_string) as client:
         # ── Warm up peer cache via dialogs ────────────────────────────────────────
@@ -347,9 +351,12 @@ async def forward_messages(
                 msg.video is None and msg.photo is None and
                 msg.audio is None and msg.document is None and
                 msg.animation is None and msg.voice is None and
-                msg.sticker is None and msg.poll is None
+                msg.sticker is None and msg.poll is None and
+                msg.contact is None and getattr(msg, 'dice', None) is None and
+                msg.video_note is None
             )
             is_media = any(getattr(msg, t, None) is not None for t in MEDIA_TYPES)
+            is_non_dl = any(getattr(msg, t, None) is not None for t in NON_DOWNLOADABLE)
             has_video = msg.video is not None
             has_document = msg.document is not None
             can_have_thumbnail = has_video or has_document
@@ -377,7 +384,6 @@ async def forward_messages(
                     # Try standard copying first
                     try:
                         if override_caption:
-                            # Media with custom caption only (no thumbnail)
                             await client.copy_message(
                                 chat_id=dest_id,
                                 from_chat_id=source,
@@ -385,61 +391,108 @@ async def forward_messages(
                                 caption=effective_caption,
                             )
                         else:
-                            # Text or media with no overrides — copy exactly as-is
                             await client.copy_message(
                                 chat_id=dest_id,
                                 from_chat_id=source,
                                 message_id=msg_id,
                             )
                     except ChatForwardsRestricted:
-                        # ── Fallback for restricted channels ─────────────────────
-                        if is_text_only:
-                            await client.send_message(
-                                chat_id=dest_id,
-                                text=msg.text or msg.caption,
-                                entities=msg.entities or msg.caption_entities
+                        # ── Fallback for restricted channels — handle every type ──
+                        await _restricted_send(dest_id)
+
+                async def _restricted_send(dest_id):
+                    """Re-send a message from a restricted channel without copying."""
+                    ents = msg.caption_entities if not override_caption else None
+                    thumb_kwargs = {}
+                    if thumbnail_path and can_have_thumbnail and os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
+                        thumb_kwargs = {"thumb": thumbnail_path}
+
+                    if is_text_only:
+                        # Plain text (with link entities preserved)
+                        await client.send_message(
+                            chat_id=dest_id,
+                            text=msg.text or msg.caption or "",
+                            entities=msg.entities or msg.caption_entities,
+                            disable_web_page_preview=False,
+                        )
+                    elif msg.poll:
+                        poll = msg.poll
+                        await client.send_poll(
+                            chat_id=dest_id,
+                            question=poll.question,
+                            options=[opt.text for opt in poll.options],
+                            is_anonymous=poll.is_anonymous,
+                            allows_multiple_answers=poll.allows_multiple_answers,
+                        )
+                    elif msg.contact:
+                        c = msg.contact
+                        await client.send_contact(
+                            chat_id=dest_id,
+                            phone_number=c.phone_number,
+                            first_name=c.first_name,
+                            last_name=c.last_name or "",
+                        )
+                    elif msg.venue:
+                        v = msg.venue
+                        await client.send_venue(
+                            chat_id=dest_id,
+                            latitude=v.location.latitude,
+                            longitude=v.location.longitude,
+                            title=v.title,
+                            address=v.address,
+                        )
+                    elif msg.location:
+                        await client.send_location(
+                            chat_id=dest_id,
+                            latitude=msg.location.latitude,
+                            longitude=msg.location.longitude,
+                        )
+                    elif getattr(msg, 'dice', None):
+                        await client.send_dice(
+                            chat_id=dest_id,
+                            emoji=msg.dice.emoji,
+                        )
+                    elif is_media or msg.video_note:
+                        # Must download and re-upload
+                        dl_path = None
+                        try:
+                            dl_path = await asyncio.wait_for(
+                                client.download_media(msg, in_memory=False, progress=make_prog("Downloading")),
+                                timeout=DOWNLOAD_TIMEOUT,
                             )
-                        else:
-                            # It's media. We must download and send manually.
-                            dl_path = None
-                            try:
-                                dl_path = await client.download_media(msg, in_memory=False, progress=make_prog("Downloading"))
-                                if dl_path:
-                                    if os.path.getsize(dl_path) == 0:
-                                        raise ValueError("File downloaded is 0 bytes (likely Telegram timeout)")
+                            if not dl_path:
+                                raise ValueError("Download returned no file")
+                            if os.path.getsize(dl_path) == 0:
+                                raise ValueError("Downloaded file is 0 bytes — likely a Telegram timeout")
 
-                                    # Copy original entities if no override
-                                    ents = msg.caption_entities if not override_caption else None
-
-                                    thumb_kwargs = {}
-                                    if thumbnail_path and can_have_thumbnail and os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
-                                        thumb_kwargs = {"thumb": thumbnail_path}
-
-                                    if msg.video:
-                                        await client.send_video(dest_id, video=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading video"), **thumb_kwargs)
-                                    elif msg.document:
-                                        await client.send_document(dest_id, document=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading document"), **thumb_kwargs)
-                                    elif msg.photo:
-                                        await client.send_photo(dest_id, photo=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
-                                    elif msg.audio:
-                                        await client.send_audio(dest_id, audio=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
-                                    elif msg.voice:
-                                        await client.send_voice(dest_id, voice=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
-                                    elif msg.animation:
-                                        await client.send_animation(dest_id, animation=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
-                                    elif msg.sticker:
-                                        await client.send_sticker(dest_id, sticker=dl_path, progress=make_prog("Uploading"))
-                                    else:
-                                        # Generic fallback
-                                        await client.send_document(dest_id, document=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"), **thumb_kwargs)
-                                else:
-                                    raise ValueError("Failed to download restricted media")
-                            finally:
-                                if dl_path:
-                                    try:
-                                        os.remove(dl_path)
-                                    except Exception:
-                                        pass
+                            if msg.video:
+                                await client.send_video(dest_id, video=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"), **thumb_kwargs)
+                            elif msg.document:
+                                await client.send_document(dest_id, document=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"), **thumb_kwargs)
+                            elif msg.photo:
+                                await client.send_photo(dest_id, photo=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
+                            elif msg.audio:
+                                await client.send_audio(dest_id, audio=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
+                            elif msg.voice:
+                                await client.send_voice(dest_id, voice=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
+                            elif msg.video_note:
+                                await client.send_video_note(dest_id, video_note=dl_path, progress=make_prog("Uploading"))
+                            elif msg.animation:
+                                await client.send_animation(dest_id, animation=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"))
+                            elif msg.sticker:
+                                await client.send_sticker(dest_id, sticker=dl_path, progress=make_prog("Uploading"))
+                            else:
+                                await client.send_document(dest_id, document=dl_path, caption=effective_caption, caption_entities=ents, progress=make_prog("Uploading"), **thumb_kwargs)
+                        except asyncio.TimeoutError:
+                            raise ValueError(f"Download timed out after {DOWNLOAD_TIMEOUT // 60} min — file may be too large")
+                        finally:
+                            if dl_path:
+                                try:
+                                    os.remove(dl_path)
+                                except Exception:
+                                    pass
+                    else:
+                        raise ValueError(f"Unsupported message type in restricted channel (msg #{msg_id})")
 
                 try:
                     await _send_to(dest)

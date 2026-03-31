@@ -30,7 +30,7 @@ from handlers.start import _require_admin
 import config
 
 # ── Conversation states ───────────────────────────────────────────────────────
-SRC, MSG, CAPTION, THUMB, DST = range(5)
+SRC, MSG, COUNT, CAPTION, THUMB, DST = range(6)
 
 # ── Per-user stop events for running jobs ─────────────────────────────────────
 _stop_events: dict[str, asyncio.Event] = {}
@@ -119,7 +119,7 @@ async def fw_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     }
 
     await update.callback_query.edit_message_text(
-        f"{E['forward']} *Forward — Step 1/6  ·  Source Channel*\n"
+        f"{E['forward']} *Forward — Step 1/7  ·  Source Channel*\n"
         "━━━━━━━━━━━━━━━━━━━━━\n\n"
         "Send the **source channel** link or username:\n\n"
         "• `@username`\n"
@@ -167,15 +167,13 @@ async def fw_src_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await wait.delete()
 
     await update.message.reply_text(
-        f"{E['forward']} *Forward — Step 2/6  ·  Message Link(s)*\n"
+        f"{E['forward']} *Forward — Step 2/7  ·  Start Message Link*\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"✅ Source: `{info['title']}`\n\n"
-        "📎 *Paste the message link(s) to forward:*\n\n"
-        "*Single message:*\n"
-        "`https://t.me/c/1234567890/100`\n\n"
-        "*Range (start to end — send both on one line):*\n"
-        "`https://t.me/c/1234567890/100  https://t.me/c/1234567890/200`\n\n"
-        "_Right-click any message → Copy Message Link_",
+        "📎 *Paste the link of the FIRST message to forward:*\n\n"
+        "• `https://t.me/c/1234567890/100` ← private channel\n"
+        "• `https://t.me/username/100` ← public channel\n\n"
+        "_Right-click any message in Telegram → Copy Message Link_",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=_cancel_kb(),
     )
@@ -185,19 +183,12 @@ async def fw_src_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────  Step 2: Message Link(s)  ─────────────────────────
 
 async def fw_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Parse message link(s) to determine the forward range."""
+    """Step 2 — Parse the single start message link."""
     text = update.message.text.strip()
     fw = ctx.user_data["fw"]
 
-    # Split on whitespace to find up to 2 links/numbers
     parts = text.split()
-
-    id1 = id2 = None
-
-    # Try to parse first link
     _, id1 = _parse_msg_link(parts[0]) if parts else (None, None)
-    if len(parts) >= 2:
-        _, id2 = _parse_msg_link(parts[1])
 
     if not id1:
         await update.message.reply_text(
@@ -210,27 +201,52 @@ async def fw_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return MSG
 
-    start_id = min(id1, id2) if id2 else id1
-    end_id = max(id1, id2) if id2 else id1
+    fw["start_id"] = id1
+    fw["msg_link_raw"] = text
 
-    # Enforce max cap
-    cap = config.MAX_FORWARD
-    if end_id - start_id + 1 > cap:
-        start_id = end_id - cap + 1
+    await update.message.reply_text(
+        f"{E['forward']} *Forward — Step 3/7  ·  Number of Messages*\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        f"✅ Source: `{fw['source_title']}`\n"
+        f"✅ Start message ID: `{id1}`\n\n"
+        "🔢 *How many messages to forward?*\n"
+        "Send a number (1 – 1000).\n\n"
+        "_Example: `10` → forwards the linked message + 9 more after it (10 total)._",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=_cancel_kb(),
+    )
+    return COUNT
+
+
+# ─────────────────────────  Step 3: Count  ───────────────────────────────────
+
+async def fw_count(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Step 3 — Receive the total count of messages to forward."""
+    text = update.message.text.strip()
+    fw = ctx.user_data["fw"]
+
+    if not text.isdigit() or int(text) < 1:
         await update.message.reply_text(
-            f"{E['warn']} Range capped to `{cap}` messages. Start adjusted to `{start_id}`.",
+            f"{E['warn']} Please enter a valid number between 1 and {config.MAX_FORWARD}.",
+            reply_markup=_cancel_kb(),
+        )
+        return COUNT
+
+    count = int(text)
+    if count > config.MAX_FORWARD:
+        count = config.MAX_FORWARD
+        await update.message.reply_text(
+            f"{E['warn']} Capped to maximum `{config.MAX_FORWARD}` messages.",
             parse_mode=ParseMode.MARKDOWN,
         )
 
-    fw["start_id"] = start_id
+    start_id = fw["start_id"]
+    end_id = start_id + count - 1
     fw["end_id"] = end_id
-    fw["msg_link_raw"] = text
-
     total = end_id - start_id + 1
 
-    # Proceed to caption step
     await update.message.reply_text(
-        f"{E['forward']} *Forward — Step 3/6  ·  Caption*\n"
+        f"{E['forward']} *Forward — Step 4/7  ·  Caption*\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"Source: `{fw['source_title']}`\n"
         f"Messages: `{start_id}` → `{end_id}` (*{total}* msg{'s' if total > 1 else ''})\n\n"
@@ -264,7 +280,7 @@ async def _ask_thumb(message, ctx, new=False):
     fw = ctx.user_data["fw"]
     cap_str = f"`{fw['caption'][:60]}`" if fw.get("caption") else "_keep original_"
     text = (
-        f"{E['forward']} *Forward — Step 4/6  ·  Thumbnail*\n"
+        f"{E['forward']} *Forward — Step 5/7  ·  Thumbnail*\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"Caption: {cap_str}\n\n"
         "🖼️ Send a **photo** to replace thumbnails on videos & documents,\n"
@@ -312,7 +328,7 @@ async def _ask_dst(message, ctx, new=False):
     dests = fw["destinations"]
     dests_str = ("*Added:*  " + ", ".join(f"`{d['title'][:20]}`" for d in dests)) if dests else "_None yet_"
     text = (
-        f"{E['forward']} *Forward — Step 5/6  ·  Destination*\n"
+        f"{E['forward']} *Forward — Step 6/7  ·  Destination*\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"Source: `{fw['source_title']}`\n\n"
         "📥 Where to forward *to*?\n"
@@ -607,6 +623,10 @@ def register(app):
             ],
             MSG: [
                 MessageHandler(text_filter, fw_msg),
+                CallbackQueryHandler(fw_cancel, pattern="^fw_cancel$"),
+            ],
+            COUNT: [
+                MessageHandler(text_filter, fw_count),
                 CallbackQueryHandler(fw_cancel, pattern="^fw_cancel$"),
             ],
             CAPTION: [
