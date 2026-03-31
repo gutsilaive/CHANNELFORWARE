@@ -277,7 +277,7 @@ async def forward_messages(
         needed_ids: set = {source} | {d for d in destinations}
         found_ids: set = set()
         try:
-            async for dialog in client.get_dialogs(limit=1000):  # scan top 1000 dialogs
+            async for dialog in client.get_dialogs(limit=200):  # scan top 200 dialogs
                 if dialog.chat.id in needed_ids:
                     found_ids.add(dialog.chat.id)
                 if found_ids >= needed_ids:
@@ -537,7 +537,7 @@ async def forward_messages(
             if progress_cb:
                 await progress_cb(forwarded, total, errors, "Copying…")
 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.05)  # minimal yield; FloodWait handles real rate limiting
 
     result = {"forwarded": forwarded, "errors": errors, "skipped": skipped}
     if last_error:
