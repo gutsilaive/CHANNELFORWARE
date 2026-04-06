@@ -345,6 +345,11 @@ async def forward_messages(
                 skipped += 1
                 continue
 
+            # Skip service messages (join/leave/pin/unpin) — can never be forwarded
+            if msg.service is not None:
+                skipped += 1
+                continue
+
             # ── Determine message type ─────────────────────────────────────────
             is_text_only = (
                 msg.text is not None and
@@ -381,7 +386,6 @@ async def forward_messages(
 
                 async def _send_to(dest_id):
                     """Inner helper — raises on error so caller can retry."""
-                    # Try standard copying first
                     try:
                         if override_caption:
                             await client.copy_message(
@@ -397,8 +401,15 @@ async def forward_messages(
                                 message_id=msg_id,
                             )
                     except ChatForwardsRestricted:
-                        # ── Fallback for restricted channels — handle every type ──
+                        # Restricted channel — use manual re-send fallback
                         await _restricted_send(dest_id)
+                    except Exception as _copy_err:
+                        # Any other copy failure (service messages, unsupported types,
+                        # "Can't copy this message", etc.) — try manual fallback first
+                        try:
+                            await _restricted_send(dest_id)
+                        except Exception:
+                            raise _copy_err  # both failed → raise original error
 
                 async def _restricted_send(dest_id):
                     """Re-send a message from a restricted channel without copying."""
