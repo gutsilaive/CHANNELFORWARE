@@ -4,4 +4,4 @@ python-telegram-bot==21.9
 supabase>=2.9.0
 python-dotenv==1.0.0
 aiohttp==3.9.3
-
+httpx>=0.24.0

@@ -419,11 +419,14 @@ async def forward_messages(
                         thumb_kwargs = {"thumb": thumbnail_path}
 
                     if is_text_only:
-                        # Plain text (with link entities preserved)
+                        # Text message — preserve link entities exactly as-is
+                        raw_text = msg.text or ""
+                        raw_entities = msg.entities or []
                         await client.send_message(
                             chat_id=dest_id,
-                            text=msg.text or msg.caption or "",
-                            entities=msg.entities or msg.caption_entities,
+                            text=raw_text,
+                            entities=raw_entities if raw_entities else None,
+                            parse_mode=None,  # never parse — entities handle formatting
                             disable_web_page_preview=False,
                         )
                     elif msg.poll:
