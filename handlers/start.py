@@ -36,7 +36,7 @@ async def _require_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool
 WELCOME = (
     "{bot} *AutoForward Bot* `v{ver}`\n"
     "━━━━━━━━━━━━━━━━━━━━━\n"
-    "{fire} Forward up to *1,000 messages* to multiple channels at once\n"
+    "{fire} Forward up to *3,000 messages* to multiple channels at once\n"
     "{lock} No *\"Forwarded from\"* tag — messages appear as original\n"
     "{channel} Works with *private & public channels*\n"
     "━━━━━━━━━━━━━━━━━━━━━\n"
@@ -66,7 +66,7 @@ ABOUT_TEXT = (
     "• Private channel support ✅\n"
     "• Multi-destination forwarding ✅\n"
     "• Live progress updates ✅\n"
-    "• Batch up to 1,000 messages ✅\n"
+    "• Batch up to 3,000 messages \u2705\n"
 )
 
 

@@ -21,6 +21,6 @@ SUPABASE_URL: str = os.environ["SUPABASE_URL"]
 SUPABASE_KEY: str = os.environ["SUPABASE_KEY"]
 
 # ── Bot meta ──────────────────────────────────────────────────────────────────
-BOT_VERSION = "1.0.0"
-MAX_FORWARD = 1000          # maximum messages per forward job
+BOT_VERSION = "1.1.0"
+MAX_FORWARD = 3000          # maximum messages per forward job
 PROGRESS_INTERVAL = 5      # update progress message every N messages
