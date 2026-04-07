@@ -424,9 +424,28 @@ async def forward_messages(
                                     message_ids=msg_id,
                                 )
                             except Exception as _fwd_err:
-                                raise Exception(
-                                    f"Copy: {_copy_err} | Fallback: {_rsend_err} | Forward: {_fwd_err}"
-                                ) from _fwd_err
+                                # Level 4: nuclear text extraction — send ANYTHING we can find
+                                _wp4 = getattr(msg, 'web_page', None)
+                                _nuke_text = (
+                                    msg.text or msg.caption
+                                    or (getattr(_wp4, 'description', None) if _wp4 else None)
+                                    or (getattr(_wp4, 'title', None) if _wp4 else None)
+                                    or (getattr(_wp4, 'url', None) if _wp4 else None)
+                                    or (getattr(_wp4, 'display_url', None) if _wp4 else None)
+                                )
+                                if _nuke_text:
+                                    _nuke_ents = msg.entities or msg.caption_entities or []
+                                    await client.send_message(
+                                        chat_id=dest_id,
+                                        text=str(_nuke_text),
+                                        entities=_nuke_ents if _nuke_ents else None,
+                                        parse_mode=None,
+                                        disable_web_page_preview=False,
+                                    )
+                                else:
+                                    raise Exception(
+                                        f"Copy: {_copy_err} | Fallback: {_rsend_err} | Forward: {_fwd_err}"
+                                    ) from _fwd_err
 
                 async def _restricted_send(dest_id):
                     """Re-send a message from a restricted channel without copying."""
@@ -652,7 +671,14 @@ async def forward_messages(
                                 disable_web_page_preview=False,
                             )
                         else:
-                            raise ValueError(f"Cannot forward msg #{msg_id}: unrecognised type with no fallback text")
+                            # Diagnostics — surface real Pyrogram values in the error
+                            _wp_d = getattr(msg, 'web_page', None)
+                            _media_d = getattr(msg, 'media', None)
+                            raise ValueError(
+                                f"msg#{msg_id}: text={msg.text!r} cap={msg.caption!r} "
+                                f"wp={bool(_wp_d)} media={_media_d} "
+                                f"is_text={is_text_only} is_media={is_media}"
+                            )
 
                 try:
                     await _send_to(dest)
