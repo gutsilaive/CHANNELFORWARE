@@ -46,7 +46,9 @@ def _make_client(
         api_hash=api_hash or _DEFAULT_API_HASH,
         session_string=session_string,
         in_memory=True,
-        no_updates=True,  # Crucial to prevent hang on connect
+        no_updates=True,      # crucial — prevents hang on connect
+        workers=24,           # more parallel MTProto workers → faster downloads
+        sleep_threshold=60,   # wait max 60s for flood-wait before erroring
     )
 
 
@@ -521,7 +523,20 @@ async def forward_messages(
                                 except Exception:
                                     pass
                     else:
-                        raise ValueError(f"Unsupported message type in restricted channel (msg #{msg_id})")
+                        # Catch-all: web page previews, unknown types, etc.
+                        # Try to forward as plain text using whichever text field is populated
+                        text_content = msg.text or msg.caption or ""
+                        text_ents = msg.entities or msg.caption_entities or []
+                        if text_content:
+                            await client.send_message(
+                                chat_id=dest_id,
+                                text=text_content,
+                                entities=text_ents if text_ents else None,
+                                parse_mode=None,
+                                disable_web_page_preview=False,
+                            )
+                        else:
+                            raise ValueError(f"No text or supported media in msg #{msg_id}")
 
                 try:
                     await _send_to(dest)
