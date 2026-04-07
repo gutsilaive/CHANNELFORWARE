@@ -530,10 +530,65 @@ async def forward_messages(
                                     os.remove(dl_path)
                                 except Exception:
                                     pass
+                    elif getattr(msg, 'web_page', None) is not None:
+                        # ── Web page preview message ──────────────────────────────
+                        wp = msg.web_page
+                        # Collect text from all possible sources
+                        text_c = (
+                            msg.caption or msg.text
+                            or getattr(wp, 'description', None)
+                            or getattr(wp, 'title', None)
+                            or getattr(wp, 'url', None)
+                            or getattr(wp, 'display_url', None)
+                            or ""
+                        )
+                        ents_c = msg.caption_entities or msg.entities or []
+                        wp_photo = getattr(wp, 'photo', None)
+                        # Try to download and forward the preview thumbnail
+                        _wpdl = None
+                        try:
+                            if wp_photo:
+                                _wpdl = await asyncio.wait_for(
+                                    client.download_media(wp_photo, in_memory=False),
+                                    timeout=60,
+                                )
+                        except Exception:
+                            pass
+                        if _wpdl and os.path.getsize(_wpdl) > 0:
+                            try:
+                                await client.send_photo(
+                                    chat_id=dest_id,
+                                    photo=_wpdl,
+                                    caption=text_c or None,
+                                    parse_mode=None,
+                                    caption_entities=ents_c if ents_c else None,
+                                )
+                                return
+                            except Exception:
+                                pass
+                            finally:
+                                try: os.remove(_wpdl)
+                                except Exception: pass
+                        # Photo unavailable — send text only
+                        if text_c:
+                            await client.send_message(
+                                chat_id=dest_id,
+                                text=text_c,
+                                entities=ents_c if ents_c else None,
+                                parse_mode=None,
+                                disable_web_page_preview=False,
+                            )
+                        else:
+                            raise ValueError(f"Web page msg #{msg_id} has no text or photo to forward")
                     else:
-                        # Unknown type (web page preview, story, etc.)
-                        # Step 1: try download_media (captures web_page photos, stories)
-                        text_content = msg.text or msg.caption or ""
+                        # Unknown type — final catch-all
+                        wp = getattr(msg, 'web_page', None)
+                        text_content = (
+                            msg.text or msg.caption
+                            or (getattr(wp, 'description', None) if wp else None)
+                            or (getattr(wp, 'url', None) if wp else None)
+                            or ""
+                        )
                         text_ents = msg.entities or msg.caption_entities or []
                         _dl = None
                         try:
@@ -556,7 +611,6 @@ async def forward_messages(
                             if _dl:
                                 try: os.remove(_dl)
                                 except Exception: pass
-                        # Step 2: text-only fallback
                         if text_content:
                             await client.send_message(
                                 chat_id=dest_id,
