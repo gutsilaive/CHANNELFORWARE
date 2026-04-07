@@ -210,7 +210,7 @@ async def fw_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"✅ Source: `{fw['source_title']}`\n"
         f"✅ Start message ID: `{id1}`\n\n"
         "🔢 *How many messages to forward?*\n"
-        "Send a number (1 – 1000).\n\n"
+        "Send a number (1 – 3000).\n\n"
         "_Example: `10` → forwards the linked message + 9 more after it (10 total)._",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=_cancel_kb(),
