@@ -411,8 +411,9 @@ async def forward_messages(
                         # Any other copy failure — try manual fallback first
                         try:
                             await _restricted_send(dest_id)
-                        except Exception:
-                            raise _copy_err  # both failed → raise original error
+                        except Exception as _rsend_err:
+                            # Both failed — report the actual fallback error
+                            raise Exception(f"Copy: {_copy_err} | Fallback: {_rsend_err}") from _rsend_err
 
                 async def _restricted_send(dest_id):
                     """Re-send a message from a restricted channel without copying."""
@@ -482,24 +483,35 @@ async def forward_messages(
                             if os.path.getsize(dl_path) == 0:
                                 raise ValueError("Downloaded file is 0 bytes — likely a Telegram timeout")
 
-                            if msg.video:
-                                await client.send_video(dest_id, video=dl_path, caption=effective_caption, parse_mode=None, caption_entities=ents, progress=make_prog("Uploading"), **thumb_kwargs)
-                            elif msg.document:
-                                await client.send_document(dest_id, document=dl_path, caption=effective_caption, parse_mode=None, caption_entities=ents, progress=make_prog("Uploading"), **thumb_kwargs)
-                            elif msg.photo:
-                                await client.send_photo(dest_id, photo=dl_path, caption=effective_caption, parse_mode=None, caption_entities=ents, progress=make_prog("Uploading"))
-                            elif msg.audio:
-                                await client.send_audio(dest_id, audio=dl_path, caption=effective_caption, parse_mode=None, caption_entities=ents, progress=make_prog("Uploading"))
-                            elif msg.voice:
-                                await client.send_voice(dest_id, voice=dl_path, caption=effective_caption, parse_mode=None, caption_entities=ents, progress=make_prog("Uploading"))
-                            elif msg.video_note:
-                                await client.send_video_note(dest_id, video_note=dl_path, progress=make_prog("Uploading"))
-                            elif msg.animation:
-                                await client.send_animation(dest_id, animation=dl_path, caption=effective_caption, parse_mode=None, caption_entities=ents, progress=make_prog("Uploading"))
-                            elif msg.sticker:
-                                await client.send_sticker(dest_id, sticker=dl_path, progress=make_prog("Uploading"))
-                            else:
-                                await client.send_document(dest_id, document=dl_path, caption=effective_caption, parse_mode=None, caption_entities=ents, progress=make_prog("Uploading"), **thumb_kwargs)
+                            # Try with caption entities first; strip them on failure
+                            # (some entity types like TextUrl/Spoiler can cause send errors)
+                            for _strip_ents in (False, True):
+                                if _strip_ents and not ents:
+                                    break  # no entities to strip — nothing to retry
+                                _e = None if _strip_ents else ents
+                                try:
+                                    if msg.video:
+                                        await client.send_video(dest_id, video=dl_path, caption=effective_caption, parse_mode=None, caption_entities=_e, progress=make_prog("Uploading"), **thumb_kwargs)
+                                    elif msg.document:
+                                        await client.send_document(dest_id, document=dl_path, caption=effective_caption, parse_mode=None, caption_entities=_e, progress=make_prog("Uploading"), **thumb_kwargs)
+                                    elif msg.photo:
+                                        await client.send_photo(dest_id, photo=dl_path, caption=effective_caption, parse_mode=None, caption_entities=_e, progress=make_prog("Uploading"))
+                                    elif msg.audio:
+                                        await client.send_audio(dest_id, audio=dl_path, caption=effective_caption, parse_mode=None, caption_entities=_e, progress=make_prog("Uploading"))
+                                    elif msg.voice:
+                                        await client.send_voice(dest_id, voice=dl_path, caption=effective_caption, parse_mode=None, caption_entities=_e, progress=make_prog("Uploading"))
+                                    elif msg.video_note:
+                                        await client.send_video_note(dest_id, video_note=dl_path, progress=make_prog("Uploading"))
+                                    elif msg.animation:
+                                        await client.send_animation(dest_id, animation=dl_path, caption=effective_caption, parse_mode=None, caption_entities=_e, progress=make_prog("Uploading"))
+                                    elif msg.sticker:
+                                        await client.send_sticker(dest_id, sticker=dl_path, progress=make_prog("Uploading"))
+                                    else:
+                                        await client.send_document(dest_id, document=dl_path, caption=effective_caption, parse_mode=None, caption_entities=_e, progress=make_prog("Uploading"), **thumb_kwargs)
+                                    break  # sent successfully
+                                except Exception:
+                                    if _strip_ents:
+                                        raise  # both attempts failed
                         except asyncio.TimeoutError:
                             raise ValueError(f"Download timed out after {DOWNLOAD_TIMEOUT // 60} min — file may be too large")
                         finally:
