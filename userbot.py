@@ -354,7 +354,9 @@ async def forward_messages(
 
             # ── Determine message type ─────────────────────────────────────────
             is_text_only = (
-                msg.text is not None and
+                # Web page previews: Pyrogram puts text in msg.caption (not msg.text).
+                # So we treat msg.caption as text-only too when no real media is attached.
+                (msg.text is not None or msg.caption is not None) and
                 msg.video is None and msg.photo is None and
                 msg.audio is None and msg.document is None and
                 msg.animation is None and msg.voice is None and
@@ -434,16 +436,46 @@ async def forward_messages(
                         thumb_kwargs = {"thumb": thumbnail_path}
 
                     if is_text_only:
-                        # Text message — preserve link entities exactly as-is
-                        raw_text = msg.text or ""
-                        raw_entities = msg.entities or []
-                        await client.send_message(
-                            chat_id=dest_id,
-                            text=raw_text,
-                            entities=raw_entities if raw_entities else None,
-                            parse_mode=None,  # never parse — entities handle formatting
-                            disable_web_page_preview=False,
-                        )
+                        # Text message (or web page preview w/ text in caption)
+                        # Use both fields: Pyrogram may put text in either depending on media type
+                        raw_text = msg.text or msg.caption or ""
+                        raw_entities = msg.entities or msg.caption_entities or []
+                        wp = getattr(msg, 'web_page', None)
+                        wp_photo = getattr(wp, 'photo', None) if wp else None
+                        # If there's a web page thumbnail, send it as photo+caption
+                        if wp_photo and raw_text:
+                            _wpdl = None
+                            try:
+                                _wpdl = await asyncio.wait_for(
+                                    client.download_media(wp_photo, in_memory=False),
+                                    timeout=60,
+                                )
+                                if _wpdl and os.path.getsize(_wpdl) > 0:
+                                    await client.send_photo(
+                                        chat_id=dest_id,
+                                        photo=_wpdl,
+                                        caption=raw_text,
+                                        parse_mode=None,
+                                        caption_entities=raw_entities if raw_entities else None,
+                                    )
+                                    return
+                            except Exception:
+                                pass
+                            finally:
+                                if _wpdl:
+                                    try: os.remove(_wpdl)
+                                    except Exception: pass
+                        # No web page photo (or download failed) — send as plain text
+                        if raw_text:
+                            await client.send_message(
+                                chat_id=dest_id,
+                                text=raw_text,
+                                entities=raw_entities if raw_entities else None,
+                                parse_mode=None,
+                                disable_web_page_preview=False,
+                            )
+                        else:
+                            raise ValueError(f"Message #{msg_id} has no text content")
                     elif msg.poll:
                         poll = msg.poll
                         await client.send_poll(
