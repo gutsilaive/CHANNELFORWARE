@@ -410,12 +410,21 @@ async def forward_messages(
                         # Restricted channel — use manual re-send fallback
                         await _restricted_send(dest_id)
                     except Exception as _copy_err:
-                        # Any other copy failure — try manual fallback first
+                        # Any other copy failure — try manual fallback then raw forward
                         try:
                             await _restricted_send(dest_id)
                         except Exception as _rsend_err:
-                            # Both failed — report the actual fallback error
-                            raise Exception(f"Copy: {_copy_err} | Fallback: {_rsend_err}") from _rsend_err
+                            # Last resort: Telegram forward_messages (shows “Forwarded from” tag)
+                            try:
+                                await client.forward_messages(
+                                    chat_id=dest_id,
+                                    from_chat_id=source,
+                                    message_ids=msg_id,
+                                )
+                            except Exception as _fwd_err:
+                                raise Exception(
+                                    f"Copy: {_copy_err} | Fallback: {_rsend_err} | Forward: {_fwd_err}"
+                                ) from _fwd_err
 
                 async def _restricted_send(dest_id):
                     """Re-send a message from a restricted channel without copying."""
@@ -485,35 +494,34 @@ async def forward_messages(
                             if os.path.getsize(dl_path) == 0:
                                 raise ValueError("Downloaded file is 0 bytes — likely a Telegram timeout")
 
-                            # Try with caption entities first; strip them on failure
-                            # (some entity types like TextUrl/Spoiler can cause send errors)
-                            for _strip_ents in (False, True):
-                                if _strip_ents and not ents:
-                                    break  # no entities to strip — nothing to retry
-                                _e = None if _strip_ents else ents
-                                try:
-                                    if msg.video:
-                                        await client.send_video(dest_id, video=dl_path, caption=effective_caption, parse_mode=None, caption_entities=_e, progress=make_prog("Uploading"), **thumb_kwargs)
-                                    elif msg.document:
-                                        await client.send_document(dest_id, document=dl_path, caption=effective_caption, parse_mode=None, caption_entities=_e, progress=make_prog("Uploading"), **thumb_kwargs)
-                                    elif msg.photo:
-                                        await client.send_photo(dest_id, photo=dl_path, caption=effective_caption, parse_mode=None, caption_entities=_e, progress=make_prog("Uploading"))
-                                    elif msg.audio:
-                                        await client.send_audio(dest_id, audio=dl_path, caption=effective_caption, parse_mode=None, caption_entities=_e, progress=make_prog("Uploading"))
-                                    elif msg.voice:
-                                        await client.send_voice(dest_id, voice=dl_path, caption=effective_caption, parse_mode=None, caption_entities=_e, progress=make_prog("Uploading"))
-                                    elif msg.video_note:
-                                        await client.send_video_note(dest_id, video_note=dl_path, progress=make_prog("Uploading"))
-                                    elif msg.animation:
-                                        await client.send_animation(dest_id, animation=dl_path, caption=effective_caption, parse_mode=None, caption_entities=_e, progress=make_prog("Uploading"))
-                                    elif msg.sticker:
-                                        await client.send_sticker(dest_id, sticker=dl_path, progress=make_prog("Uploading"))
-                                    else:
-                                        await client.send_document(dest_id, document=dl_path, caption=effective_caption, parse_mode=None, caption_entities=_e, progress=make_prog("Uploading"), **thumb_kwargs)
-                                    break  # sent successfully
-                                except Exception:
-                                    if _strip_ents:
-                                        raise  # both attempts failed
+                            # Upload helper: try with entities, retry without on failure
+                            async def _do_upload(cap_ents):
+                                if msg.video:
+                                    await client.send_video(dest_id, video=dl_path, caption=effective_caption, parse_mode=None, caption_entities=cap_ents, progress=make_prog("Uploading"), **thumb_kwargs)
+                                elif msg.document:
+                                    await client.send_document(dest_id, document=dl_path, caption=effective_caption, parse_mode=None, caption_entities=cap_ents, progress=make_prog("Uploading"), **thumb_kwargs)
+                                elif msg.photo:
+                                    await client.send_photo(dest_id, photo=dl_path, caption=effective_caption, parse_mode=None, caption_entities=cap_ents, progress=make_prog("Uploading"))
+                                elif msg.audio:
+                                    await client.send_audio(dest_id, audio=dl_path, caption=effective_caption, parse_mode=None, caption_entities=cap_ents, progress=make_prog("Uploading"))
+                                elif msg.voice:
+                                    await client.send_voice(dest_id, voice=dl_path, caption=effective_caption, parse_mode=None, caption_entities=cap_ents, progress=make_prog("Uploading"))
+                                elif msg.video_note:
+                                    await client.send_video_note(dest_id, video_note=dl_path, progress=make_prog("Uploading"))
+                                elif msg.animation:
+                                    await client.send_animation(dest_id, animation=dl_path, caption=effective_caption, parse_mode=None, caption_entities=cap_ents, progress=make_prog("Uploading"))
+                                elif msg.sticker:
+                                    await client.send_sticker(dest_id, sticker=dl_path, progress=make_prog("Uploading"))
+                                else:
+                                    await client.send_document(dest_id, document=dl_path, caption=effective_caption, parse_mode=None, caption_entities=cap_ents, progress=make_prog("Uploading"), **thumb_kwargs)
+
+                            try:
+                                await _do_upload(ents)
+                            except Exception:
+                                if ents:  # retry without entities (fixes TextUrl/Spoiler issues)
+                                    await _do_upload(None)
+                                else:
+                                    raise
                         except asyncio.TimeoutError:
                             raise ValueError(f"Download timed out after {DOWNLOAD_TIMEOUT // 60} min — file may be too large")
                         finally:
@@ -523,10 +531,32 @@ async def forward_messages(
                                 except Exception:
                                     pass
                     else:
-                        # Catch-all: web page previews, unknown types, etc.
-                        # Try to forward as plain text using whichever text field is populated
+                        # Unknown type (web page preview, story, etc.)
+                        # Step 1: try download_media (captures web_page photos, stories)
                         text_content = msg.text or msg.caption or ""
                         text_ents = msg.entities or msg.caption_entities or []
+                        _dl = None
+                        try:
+                            _dl = await asyncio.wait_for(
+                                client.download_media(msg, in_memory=False),
+                                timeout=DOWNLOAD_TIMEOUT,
+                            )
+                            if _dl and os.path.getsize(_dl) > 0:
+                                await client.send_document(
+                                    chat_id=dest_id,
+                                    document=_dl,
+                                    caption=text_content or None,
+                                    parse_mode=None,
+                                    caption_entities=text_ents if text_ents else None,
+                                )
+                                return
+                        except Exception:
+                            pass
+                        finally:
+                            if _dl:
+                                try: os.remove(_dl)
+                                except Exception: pass
+                        # Step 2: text-only fallback
                         if text_content:
                             await client.send_message(
                                 chat_id=dest_id,
@@ -536,7 +566,7 @@ async def forward_messages(
                                 disable_web_page_preview=False,
                             )
                         else:
-                            raise ValueError(f"No text or supported media in msg #{msg_id}")
+                            raise ValueError(f"Cannot forward msg #{msg_id}: unrecognised type with no fallback text")
 
                 try:
                     await _send_to(dest)
