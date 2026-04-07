@@ -443,9 +443,35 @@ async def forward_messages(
                                         disable_web_page_preview=False,
                                     )
                                 else:
-                                    raise Exception(
-                                        f"Copy: {_copy_err} | Fallback: {_rsend_err} | Forward: {_fwd_err}"
-                                    ) from _fwd_err
+                                    # Level 5: raw MTProto — read message.message directly
+                                    _raw5 = None
+                                    try:
+                                        from pyrogram.raw.types import InputMessageID
+                                        _p5 = await client.resolve_peer(source)
+                                        if hasattr(_p5, 'channel_id'):
+                                            from pyrogram.raw.functions.channels import GetMessages as _CM5
+                                            _rv5 = await client.invoke(_CM5(channel=_p5, id=[InputMessageID(id=msg_id)]))
+                                        else:
+                                            from pyrogram.raw.functions.messages import GetMessages as _MM5
+                                            _rv5 = await client.invoke(_MM5(id=[InputMessageID(id=msg_id)]))
+                                        for _rm5 in getattr(_rv5, 'messages', []):
+                                            _t5 = getattr(_rm5, 'message', '') or ''
+                                            if _t5:
+                                                _raw5 = _t5
+                                                break
+                                    except Exception:
+                                        pass
+                                    if _raw5:
+                                        await client.send_message(
+                                            chat_id=dest_id,
+                                            text=_raw5,
+                                            parse_mode=None,
+                                            disable_web_page_preview=False,
+                                        )
+                                    else:
+                                        raise Exception(
+                                            f"Copy: {_copy_err} | Fallback: {_rsend_err} | Forward: {_fwd_err}"
+                                        ) from _fwd_err
 
                 async def _restricted_send(dest_id):
                     """Re-send a message from a restricted channel without copying."""
