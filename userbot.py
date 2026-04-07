@@ -671,14 +671,41 @@ async def forward_messages(
                                 disable_web_page_preview=False,
                             )
                         else:
-                            # Diagnostics — surface real Pyrogram values in the error
-                            _wp_d = getattr(msg, 'web_page', None)
-                            _media_d = getattr(msg, 'media', None)
-                            raise ValueError(
-                                f"msg#{msg_id}: text={msg.text!r} cap={msg.caption!r} "
-                                f"wp={bool(_wp_d)} media={_media_d} "
-                                f"is_text={is_text_only} is_media={is_media}"
-                            )
+                            # ── Raw MTProto fallback ─────────────────────────
+                            # Pyrogram returns None for text/caption/web_page
+                            # when WebPage is Empty/Pending. The actual text is
+                            # in the raw MTProto message.message field.
+                            _raw_text = None
+                            try:
+                                from pyrogram.raw.types import InputMessageID
+                                _peer = await client.resolve_peer(source)
+                                if hasattr(_peer, 'channel_id'):
+                                    from pyrogram.raw.functions.channels import GetMessages as _CM
+                                    _rv = await client.invoke(_CM(channel=_peer, id=[InputMessageID(id=msg_id)]))
+                                else:
+                                    from pyrogram.raw.functions.messages import GetMessages as _MM
+                                    _rv = await client.invoke(_MM(id=[InputMessageID(id=msg_id)]))
+                                for _rm in getattr(_rv, 'messages', []):
+                                    _t = getattr(_rm, 'message', '') or ''
+                                    if _t:
+                                        _raw_text = _t
+                                        break
+                            except Exception:
+                                pass
+                            if _raw_text:
+                                await client.send_message(
+                                    chat_id=dest_id,
+                                    text=_raw_text,
+                                    parse_mode=None,
+                                    disable_web_page_preview=False,
+                                )
+                            else:
+                                raise ValueError(
+                                    f"msg#{msg_id}: text={msg.text!r} cap={msg.caption!r} "
+                                    f"wp={bool(getattr(msg,'web_page',None))} "
+                                    f"media={getattr(msg,'media',None)} — "
+                                    f"raw MTProto also returned no text"
+                                )
 
                 try:
                     await _send_to(dest)
