@@ -703,30 +703,55 @@ async def forward_messages(
                         else:
                             # ── Multi-strategy text extraction ────────────────
                             _raw_text = None
-                            _errs = {}  # collect each strategy's failure
+                            _errs = {}
 
-                            # Strategy A: get_chat_history
-                            try:
-                                async for _hm in client.get_chat_history(
-                                    source, offset_id=msg_id + 1, limit=10
-                                ):
-                                    if _hm.id == msg_id:
-                                        _raw_text = _hm.text or _hm.caption or ""
+                            # Strategy C: forwarded message — get text from original source
+                            # When a message is forwarded INTO a restricted channel without a
+                            # caption, message.message="" but the displayed text is from the
+                            # original message. We can fetch it directly from there.
+                            _fwd_chat = getattr(msg, "forward_from_chat", None)
+                            _fwd_mid = getattr(msg, "forward_from_message_id", None)
+                            if _fwd_chat and _fwd_mid:
+                                try:
+                                    _orig = await client.get_messages(_fwd_chat.id, _fwd_mid)
+                                    if _orig and not _orig.empty:
+                                        _raw_text = _orig.text or _orig.caption or ""
                                         if not _raw_text:
-                                            _hwp = getattr(_hm, "web_page", None)
+                                            _wp2 = getattr(_orig, "web_page", None)
                                             _raw_text = (
-                                                (getattr(_hwp, "description", None) if _hwp else None)
-                                                or (getattr(_hwp, "url", None) if _hwp else None)
+                                                (getattr(_wp2, "description", None) if _wp2 else None)
+                                                or (getattr(_wp2, "url", None) if _wp2 else None)
                                                 or ""
                                             )
                                         if not _raw_text:
-                                            _errs["hist"] = f"found msg; still empty (media={getattr(_hm,'media',None)})"
-                                        break
-                                else:
-                                    _errs["hist"] = "not found"
-                            except Exception as _he:
-                                _errs["hist"] = str(_he)[:30]
-                                logger.warning(f"get_chat_history msg#{msg_id}: {_he}")
+                                            _errs["fwd"] = f"orig empty media={getattr(_orig,'media',None)}"
+                                except Exception as _fe:
+                                    _errs["fwd"] = str(_fe)[:40]
+                                    logger.warning(f"fwd-origin fetch msg#{msg_id}: {_fe}")
+
+                            # Strategy A: get_chat_history
+                            if not _raw_text:
+                                try:
+                                    async for _hm in client.get_chat_history(
+                                        source, offset_id=msg_id + 1, limit=10
+                                    ):
+                                        if _hm.id == msg_id:
+                                            _raw_text = _hm.text or _hm.caption or ""
+                                            if not _raw_text:
+                                                _hwp = getattr(_hm, "web_page", None)
+                                                _raw_text = (
+                                                    (getattr(_hwp, "description", None) if _hwp else None)
+                                                    or (getattr(_hwp, "url", None) if _hwp else None)
+                                                    or ""
+                                                )
+                                            if not _raw_text:
+                                                _errs["hist"] = f"empty(m={getattr(_hm,'media',None)},fwd={getattr(_hm,'forward_from_chat',None)})"
+                                            break
+                                    else:
+                                        _errs["hist"] = "not found"
+                                except Exception as _he:
+                                    _errs["hist"] = str(_he)[:30]
+                                    logger.warning(f"get_chat_history msg#{msg_id}: {_he}")
 
                             # Strategy B: raw MTProto channels.GetMessages
                             if not _raw_text:
