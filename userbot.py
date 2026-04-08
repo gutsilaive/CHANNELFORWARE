@@ -5,8 +5,10 @@ userbot.py — Pyrogram user-client logic
   • Forward messages (copy, no "Forwarded" tag, optional custom caption + thumbnail)
 """
 from __future__ import annotations
-import asyncio, re, os
+import asyncio, re, os, logging
 from typing import Callable, Awaitable
+
+logger = logging.getLogger(__name__)
 
 from pyrogram import Client
 from pyrogram.raw.functions.messages import CheckChatInvite
@@ -699,28 +701,54 @@ async def forward_messages(
                                 disable_web_page_preview=False,
                             )
                         else:
-                            # ── Raw MTProto fallback ─────────────────────────
-                            # Pyrogram returns None for text/caption/web_page
-                            # when WebPage is Empty/Pending. The actual text is
-                            # in the raw MTProto message.message field.
+                            # ── Multi-strategy text extraction ────────────────
+                            # Pyrogram get_messages returns text=None for WebPageEmpty.
+                            # Try two alternative methods to get the raw text.
                             _raw_text = None
+
+                            # Strategy A: get_chat_history (messages.GetHistory endpoint)
                             try:
-                                from pyrogram.raw.types import InputMessageID, InputChannel
-                                _peer = await client.resolve_peer(source)
-                                if hasattr(_peer, 'channel_id'):
-                                    from pyrogram.raw.functions.channels import GetMessages as _CM
-                                    _ic = InputChannel(channel_id=_peer.channel_id, access_hash=_peer.access_hash)
-                                    _rv = await client.invoke(_CM(channel=_ic, id=[InputMessageID(id=msg_id)]))
-                                else:
-                                    from pyrogram.raw.functions.messages import GetMessages as _MM
-                                    _rv = await client.invoke(_MM(id=[InputMessageID(id=msg_id)]))
-                                for _rm in getattr(_rv, 'messages', []):
-                                    _t = getattr(_rm, 'message', '') or ''
-                                    if _t:
-                                        _raw_text = _t
+                                async for _hm in client.get_chat_history(
+                                    source, offset_id=msg_id + 1, limit=10
+                                ):
+                                    if _hm.id == msg_id:
+                                        _raw_text = _hm.text or _hm.caption or ""
+                                        if not _raw_text:
+                                            _hwp = getattr(_hm, "web_page", None)
+                                            _raw_text = (
+                                                (getattr(_hwp, "description", None) if _hwp else None)
+                                                or (getattr(_hwp, "url", None) if _hwp else None)
+                                                or ""
+                                            )
                                         break
-                            except Exception:
-                                pass
+                            except Exception as _hist_err:
+                                logger.warning(f"get_chat_history fallback msg#{msg_id}: {_hist_err}")
+
+                            # Strategy B: raw MTProto channels.GetMessages
+                            if not _raw_text:
+                                try:
+                                    from pyrogram.raw.types import InputMessageID, InputChannel
+                                    _peer = await client.resolve_peer(source)
+                                    if hasattr(_peer, "channel_id"):
+                                        from pyrogram.raw.functions.channels import GetMessages as _CM
+                                        _ic = InputChannel(
+                                            channel_id=_peer.channel_id,
+                                            access_hash=_peer.access_hash,
+                                        )
+                                        _rv = await client.invoke(
+                                            _CM(channel=_ic, id=[InputMessageID(id=msg_id)])
+                                        )
+                                    else:
+                                        from pyrogram.raw.functions.messages import GetMessages as _MM
+                                        _rv = await client.invoke(_MM(id=[InputMessageID(id=msg_id)]))
+                                    for _rm in getattr(_rv, "messages", []):
+                                        _t = getattr(_rm, "message", "") or ""
+                                        if _t:
+                                            _raw_text = _t
+                                            break
+                                except Exception as _raw_err:
+                                    logger.warning(f"Raw MTProto fallback msg#{msg_id}: {_raw_err}")
+
                             if _raw_text:
                                 await client.send_message(
                                     chat_id=dest_id,
@@ -733,7 +761,7 @@ async def forward_messages(
                                     f"msg#{msg_id}: text={msg.text!r} cap={msg.caption!r} "
                                     f"wp={bool(getattr(msg,'web_page',None))} "
                                     f"media={getattr(msg,'media',None)} — "
-                                    f"raw MTProto also returned no text"
+                                    f"all extraction strategies failed"
                                 )
 
                 try:
