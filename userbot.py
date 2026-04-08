@@ -702,11 +702,10 @@ async def forward_messages(
                             )
                         else:
                             # ── Multi-strategy text extraction ────────────────
-                            # Pyrogram get_messages returns text=None for WebPageEmpty.
-                            # Try two alternative methods to get the raw text.
                             _raw_text = None
+                            _errs = {}  # collect each strategy's failure
 
-                            # Strategy A: get_chat_history (messages.GetHistory endpoint)
+                            # Strategy A: get_chat_history
                             try:
                                 async for _hm in client.get_chat_history(
                                     source, offset_id=msg_id + 1, limit=10
@@ -720,9 +719,14 @@ async def forward_messages(
                                                 or (getattr(_hwp, "url", None) if _hwp else None)
                                                 or ""
                                             )
+                                        if not _raw_text:
+                                            _errs["hist"] = f"found msg; still empty (media={getattr(_hm,'media',None)})"
                                         break
-                            except Exception as _hist_err:
-                                logger.warning(f"get_chat_history fallback msg#{msg_id}: {_hist_err}")
+                                else:
+                                    _errs["hist"] = "msg not found in history window"
+                            except Exception as _he:
+                                _errs["hist"] = str(_he)[:120]
+                                logger.warning(f"get_chat_history msg#{msg_id}: {_he}")
 
                             # Strategy B: raw MTProto channels.GetMessages
                             if not _raw_text:
@@ -741,13 +745,19 @@ async def forward_messages(
                                     else:
                                         from pyrogram.raw.functions.messages import GetMessages as _MM
                                         _rv = await client.invoke(_MM(id=[InputMessageID(id=msg_id)]))
-                                    for _rm in getattr(_rv, "messages", []):
+                                    _got = getattr(_rv, "messages", [])
+                                    if not _got:
+                                        _errs["raw"] = "API returned 0 messages"
+                                    for _rm in _got:
                                         _t = getattr(_rm, "message", "") or ""
                                         if _t:
                                             _raw_text = _t
                                             break
-                                except Exception as _raw_err:
-                                    logger.warning(f"Raw MTProto fallback msg#{msg_id}: {_raw_err}")
+                                    if _got and not _raw_text:
+                                        _errs["raw"] = f"{len(_got)} msgs all empty"
+                                except Exception as _re:
+                                    _errs["raw"] = str(_re)[:120]
+                                    logger.warning(f"Raw MTProto msg#{msg_id}: {_re}")
 
                             if _raw_text:
                                 await client.send_message(
@@ -758,10 +768,9 @@ async def forward_messages(
                                 )
                             else:
                                 raise ValueError(
-                                    f"msg#{msg_id}: text={msg.text!r} cap={msg.caption!r} "
-                                    f"wp={bool(getattr(msg,'web_page',None))} "
-                                    f"media={getattr(msg,'media',None)} — "
-                                    f"all extraction strategies failed"
+                                    f"msg#{msg_id} | "
+                                    f"hist={_errs.get('hist','no_err_but_no_text')} | "
+                                    f"raw={_errs.get('raw','no_err_but_no_text')}"
                                 )
 
                 try:
