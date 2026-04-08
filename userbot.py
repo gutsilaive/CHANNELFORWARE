@@ -444,13 +444,15 @@ async def forward_messages(
                                     )
                                 else:
                                     # Level 5: raw MTProto — read message.message directly
+                                    # resolve_peer gives InputPeerChannel; channels.GetMessages needs InputChannel
                                     _raw5 = None
                                     try:
-                                        from pyrogram.raw.types import InputMessageID
+                                        from pyrogram.raw.types import InputMessageID, InputChannel
                                         _p5 = await client.resolve_peer(source)
                                         if hasattr(_p5, 'channel_id'):
                                             from pyrogram.raw.functions.channels import GetMessages as _CM5
-                                            _rv5 = await client.invoke(_CM5(channel=_p5, id=[InputMessageID(id=msg_id)]))
+                                            _ic5 = InputChannel(channel_id=_p5.channel_id, access_hash=_p5.access_hash)
+                                            _rv5 = await client.invoke(_CM5(channel=_ic5, id=[InputMessageID(id=msg_id)]))
                                         else:
                                             from pyrogram.raw.functions.messages import GetMessages as _MM5
                                             _rv5 = await client.invoke(_MM5(id=[InputMessageID(id=msg_id)]))
@@ -703,11 +705,12 @@ async def forward_messages(
                             # in the raw MTProto message.message field.
                             _raw_text = None
                             try:
-                                from pyrogram.raw.types import InputMessageID
+                                from pyrogram.raw.types import InputMessageID, InputChannel
                                 _peer = await client.resolve_peer(source)
                                 if hasattr(_peer, 'channel_id'):
                                     from pyrogram.raw.functions.channels import GetMessages as _CM
-                                    _rv = await client.invoke(_CM(channel=_peer, id=[InputMessageID(id=msg_id)]))
+                                    _ic = InputChannel(channel_id=_peer.channel_id, access_hash=_peer.access_hash)
+                                    _rv = await client.invoke(_CM(channel=_ic, id=[InputMessageID(id=msg_id)]))
                                 else:
                                     from pyrogram.raw.functions.messages import GetMessages as _MM
                                     _rv = await client.invoke(_MM(id=[InputMessageID(id=msg_id)]))
