@@ -723,9 +723,9 @@ async def forward_messages(
                                             _errs["hist"] = f"found msg; still empty (media={getattr(_hm,'media',None)})"
                                         break
                                 else:
-                                    _errs["hist"] = "msg not found in history window"
+                                    _errs["hist"] = "not found"
                             except Exception as _he:
-                                _errs["hist"] = str(_he)[:120]
+                                _errs["hist"] = str(_he)[:30]
                                 logger.warning(f"get_chat_history msg#{msg_id}: {_he}")
 
                             # Strategy B: raw MTProto channels.GetMessages
@@ -747,14 +747,28 @@ async def forward_messages(
                                         _rv = await client.invoke(_MM(id=[InputMessageID(id=msg_id)]))
                                     _got = getattr(_rv, "messages", [])
                                     if not _got:
-                                        _errs["raw"] = "API returned 0 messages"
+                                        _errs["raw"] = "0msgs"
                                     for _rm in _got:
+                                        # 1) raw message.message text body
                                         _t = getattr(_rm, "message", "") or ""
                                         if _t:
                                             _raw_text = _t
                                             break
-                                    if _got and not _raw_text:
-                                        _errs["raw"] = f"{len(_got)} msgs all empty"
+                                        # 2) raw web page description / title / url
+                                        _rm_media = getattr(_rm, "media", None)
+                                        _rm_wp = getattr(_rm_media, "webpage", None) if _rm_media else None
+                                        _wp_str = (
+                                            (getattr(_rm_wp, "description", "") or "")
+                                            or (getattr(_rm_wp, "title", "") or "")
+                                            or (getattr(_rm_wp, "url", "") or "")
+                                        ) if _rm_wp else ""
+                                        if _wp_str:
+                                            _raw_text = _wp_str
+                                            break
+                                        _wpt = type(_rm_wp).__name__ if _rm_wp else "None"
+                                        _errs["raw"] = f"msg='{_t[:15]}' wpt={_wpt}"
+                                    if _got and not _raw_text and "raw" not in _errs:
+                                        _errs["raw"] = f"{len(_got)}msgs_empty"
                                 except Exception as _re:
                                     _errs["raw"] = str(_re)[:120]
                                     logger.warning(f"Raw MTProto msg#{msg_id}: {_re}")
@@ -768,9 +782,9 @@ async def forward_messages(
                                 )
                             else:
                                 raise ValueError(
-                                    f"msg#{msg_id} | "
-                                    f"hist={_errs.get('hist','no_err_but_no_text')} | "
-                                    f"raw={_errs.get('raw','no_err_but_no_text')}"
+                                    f"#{msg_id} "
+                                    f"H={_errs.get('hist','?')} "
+                                    f"R={_errs.get('raw','?')}"
                                 )
 
                 try:
