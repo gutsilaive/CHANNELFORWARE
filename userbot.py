@@ -798,6 +798,14 @@ async def forward_messages(
                                     _errs["raw"] = str(_re)[:120]
                                     logger.warning(f"Raw MTProto msg#{msg_id}: {_re}")
 
+                            # Strategy D: entity TextUrl — stores .url even when message.message=""
+                            if not _raw_text:
+                                for _ent in (msg.entities or msg.caption_entities or []):
+                                    _eu = getattr(_ent, "url", None)
+                                    if _eu:
+                                        _raw_text = _eu
+                                        break
+
                             if _raw_text:
                                 await client.send_message(
                                     chat_id=dest_id,
@@ -807,7 +815,7 @@ async def forward_messages(
                                 )
                             else:
                                 raise ValueError(
-                                    f"#{msg_id} "
+                                    f"UNRECOVERABLE #{msg_id} "
                                     f"H={_errs.get('hist','?')} "
                                     f"R={_errs.get('raw','?')}"
                                 )
@@ -844,6 +852,16 @@ async def forward_messages(
                 except ChatAdminRequired:
                     errors += 1
                     last_error = f"No posting rights in destination {dest}"
+
+                except ValueError as e:
+                    _emsg = str(e)
+                    if _emsg.startswith("UNRECOVERABLE"):
+                        # Web page expired (WebPageEmpty) + no text — truly no content
+                        skipped += 1
+                        last_error = f"Skipped (no content): {_emsg}"
+                    else:
+                        errors += 1
+                        last_error = _emsg
 
                 except Exception as e:
                     errors += 1
