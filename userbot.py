@@ -418,6 +418,8 @@ async def forward_messages(
                         try:
                             await _restricted_send(dest_id)
                         except Exception as _rsend_err:
+                            if str(_rsend_err).startswith("UNRECOVERABLE"):
+                                raise ValueError(str(_rsend_err))
                             # Last resort: Telegram forward_messages (shows “Forwarded from” tag)
                             try:
                                 await client.forward_messages(
@@ -805,6 +807,50 @@ async def forward_messages(
                                     if _eu:
                                         _raw_text = _eu
                                         break
+
+                            # Strategy E: t.me public web preview — Telegram CDN may
+                            # still serve the old web-page description even when the
+                            # API returns WebPageEmpty.
+                            if not _raw_text:
+                                try:
+                                    import aiohttp as _aio, re as _re3, html as _hl3
+                                    _ch_obj = await client.get_chat(source)
+                                    _ch_un = getattr(_ch_obj, "username", None)
+                                    if _ch_un:
+                                        _tme = f"https://t.me/{_ch_un}/{msg_id}?embed=1&single"
+                                        async with _aio.ClientSession(
+                                            headers={"User-Agent": "Mozilla/5.0"}
+                                        ) as _s3:
+                                            async with _s3.get(
+                                                _tme, timeout=_aio.ClientTimeout(total=8)
+                                            ) as _r3:
+                                                if _r3.status == 200:
+                                                    _pg = await _r3.text()
+                                                    for _pat3 in [
+                                                        r'class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>',
+                                                        r'class="link_preview_description"[^>]*>(.*?)</div>',
+                                                        r'class="link_preview_title"[^>]*>(.*?)</div>',
+                                                        r'<meta[^>]*property="og:description"[^>]*content="([^"]*)"',
+                                                    ]:
+                                                        _fm = _re3.search(_pat3, _pg, _re3.DOTALL | _re3.IGNORECASE)
+                                                        if _fm:
+                                                            _piece = _re3.sub(r"<br\s*/?>", "\n", _fm.group(1))
+                                                            _piece = _re3.sub(r"<[^>]+>", "", _piece)
+                                                            _piece = _hl3.unescape(_piece).strip()
+                                                            if _piece:
+                                                                _raw_text = _piece
+                                                                break
+                                                        if _raw_text:
+                                                            break
+                                                    if not _raw_text:
+                                                        _errs["tme"] = "no text in page"
+                                                else:
+                                                    _errs["tme"] = f"HTTP {_r3.status}"
+                                    else:
+                                        _errs["tme"] = "private ch"
+                                except Exception as _te:
+                                    _errs["tme"] = str(_te)[:30]
+                                    logger.warning(f"t.me strategy msg#{msg_id}: {_te}")
 
                             if _raw_text:
                                 await client.send_message(
