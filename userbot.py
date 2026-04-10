@@ -438,15 +438,22 @@ async def forward_messages(
                                     message_ids=msg_id,
                                 )
                             except Exception as _fwd_err:
+                                # If _restricted_send already exhausted all extraction strategies
+                                # (UNRECOVERABLE), skip the nuclear/MTProto levels — they'll also
+                                # find nothing and just waste time.
+                                _already_exhausted = "UNRECOVERABLE" in str(_rsend_err)
                                 # Level 4: nuclear text extraction — send ANYTHING we can find
-                                _wp4 = getattr(msg, 'web_page', None)
-                                _nuke_text = (
-                                    msg.text or msg.caption
-                                    or (getattr(_wp4, 'description', None) if _wp4 else None)
-                                    or (getattr(_wp4, 'title', None) if _wp4 else None)
-                                    or (getattr(_wp4, 'url', None) if _wp4 else None)
-                                    or (getattr(_wp4, 'display_url', None) if _wp4 else None)
-                                )
+                                if _already_exhausted:
+                                    _nuke_text = None  # Skip — already tried everything
+                                else:
+                                    _wp4 = getattr(msg, 'web_page', None)
+                                    _nuke_text = (
+                                        msg.text or msg.caption
+                                        or (getattr(_wp4, 'description', None) if _wp4 else None)
+                                        or (getattr(_wp4, 'title', None) if _wp4 else None)
+                                        or (getattr(_wp4, 'url', None) if _wp4 else None)
+                                        or (getattr(_wp4, 'display_url', None) if _wp4 else None)
+                                    )
                                 if _nuke_text:
                                     _nuke_ents = msg.entities or msg.caption_entities or []
                                     await client.send_message(
@@ -458,25 +465,26 @@ async def forward_messages(
                                     )
                                 else:
                                     # Level 5: raw MTProto — read message.message directly
-                                    # resolve_peer gives InputPeerChannel; channels.GetMessages needs InputChannel
+                                    # Skip if already exhausted all strategies in _restricted_send
                                     _raw5 = None
-                                    try:
-                                        from pyrogram.raw.types import InputMessageID, InputChannel
-                                        _p5 = await client.resolve_peer(source)
-                                        if hasattr(_p5, 'channel_id'):
-                                            from pyrogram.raw.functions.channels import GetMessages as _CM5
-                                            _ic5 = InputChannel(channel_id=_p5.channel_id, access_hash=_p5.access_hash)
-                                            _rv5 = await client.invoke(_CM5(channel=_ic5, id=[InputMessageID(id=msg_id)]))
-                                        else:
-                                            from pyrogram.raw.functions.messages import GetMessages as _MM5
-                                            _rv5 = await client.invoke(_MM5(id=[InputMessageID(id=msg_id)]))
-                                        for _rm5 in getattr(_rv5, 'messages', []):
-                                            _t5 = getattr(_rm5, 'message', '') or ''
-                                            if _t5:
-                                                _raw5 = _t5
-                                                break
-                                    except Exception:
-                                        pass
+                                    if not _already_exhausted:
+                                        try:
+                                            from pyrogram.raw.types import InputMessageID, InputChannel
+                                            _p5 = await client.resolve_peer(source)
+                                            if hasattr(_p5, 'channel_id'):
+                                                from pyrogram.raw.functions.channels import GetMessages as _CM5
+                                                _ic5 = InputChannel(channel_id=_p5.channel_id, access_hash=_p5.access_hash)
+                                                _rv5 = await client.invoke(_CM5(channel=_ic5, id=[InputMessageID(id=msg_id)]))
+                                            else:
+                                                from pyrogram.raw.functions.messages import GetMessages as _MM5
+                                                _rv5 = await client.invoke(_MM5(id=[InputMessageID(id=msg_id)]))
+                                            for _rm5 in getattr(_rv5, 'messages', []):
+                                                _t5 = getattr(_rm5, 'message', '') or ''
+                                                if _t5:
+                                                    _raw5 = _t5
+                                                    break
+                                        except Exception:
+                                            pass
                                     if _raw5:
                                         await client.send_message(
                                             chat_id=dest_id,
@@ -485,6 +493,12 @@ async def forward_messages(
                                             disable_web_page_preview=False,
                                         )
                                     else:
+                                        # If _restricted_send found no content AND forward is
+                                        # restricted → skip (not error); if forward failed for
+                                        # another reason OR _rsend_err is not UNRECOVERABLE, error.
+                                        _is_skip = "UNRECOVERABLE" in str(_rsend_err) and isinstance(_fwd_err, ChatForwardsRestricted)
+                                        if _is_skip:
+                                            raise ValueError(str(_rsend_err))
                                         raise Exception(
                                             f"Copy: {_copy_err} | Fallback: {_rsend_err} | Forward: {_fwd_err}"
                                         ) from _fwd_err
@@ -920,8 +934,13 @@ async def forward_messages(
                         last_error = _emsg
 
                 except Exception as e:
-                    errors += 1
-                    last_error = str(e)
+                    _emsg = str(e)
+                    if "UNRECOVERABLE" in _emsg:
+                        skipped += 1
+                        last_error = f"Skipped (no content): msg#{msg_id}"
+                    else:
+                        errors += 1
+                        last_error = _emsg
 
             if sent_ok > 0:
                 forwarded += 1
