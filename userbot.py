@@ -397,7 +397,19 @@ async def forward_messages(
                         await _restricted_send(dest_id)
                         return
                     try:
-                        if override_caption:
+                        # Fast-path: text/link messages — send_message is more reliable than
+                        # copy_message for web-page-preview messages on all channel types.
+                        if is_text_only and (msg.text or msg.caption):
+                            _ft = msg.text or msg.caption
+                            _fe = msg.entities or msg.caption_entities or []
+                            await client.send_message(
+                                chat_id=dest_id,
+                                text=_ft,
+                                entities=_fe if _fe else None,
+                                parse_mode=None,
+                                disable_web_page_preview=False,
+                            )
+                        elif override_caption:
                             await client.copy_message(
                                 chat_id=dest_id,
                                 from_chat_id=source,
@@ -418,8 +430,6 @@ async def forward_messages(
                         try:
                             await _restricted_send(dest_id)
                         except Exception as _rsend_err:
-                            if str(_rsend_err).startswith("UNRECOVERABLE"):
-                                raise ValueError(str(_rsend_err))
                             # Last resort: Telegram forward_messages (shows “Forwarded from” tag)
                             try:
                                 await client.forward_messages(
